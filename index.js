@@ -8,6 +8,15 @@ const app = express();
 const ALLOWED = ["https://eekr12.onrender.com" ,"http://localhost:8787];
 app.use(cors({ origin: ALLOWED, methods: ["POST"], credentials: false }));
 app.use(express.json());
+app.get("/health", (_req,res) => res.json({ ok: true, ts: Date.now() }));
+app.use((req,res,next)=>{
+  const t = Date.now();
+  res.on("finish", ()=> {
+    console.log(`${req.method} ${req.url} ${res.statusCode} ${Date.now()-t}ms`);
+  });
+  next();
+});
+
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ASSISTANT_ID   = process.env.ASSISTANT_ID;
