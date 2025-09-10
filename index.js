@@ -5,7 +5,8 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-app.use(cors());
+const ALLOWED = ["https://eekr12.onrender.com" ,"http://localhost:8787];
+app.use(cors({ origin: ALLOWED, methods: ["POST"], credentials: false }));
 app.use(express.json());
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
