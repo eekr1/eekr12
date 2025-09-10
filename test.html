@@ -1,0 +1,78 @@
+<!-- Barbare Chat Balloon (MVP) -->
+<style>
+  #bb-chat-btn{position:fixed;right:20px;bottom:20px;width:56px;height:56px;border-radius:50%;
+    border:none;cursor:pointer;box-shadow:0 8px 20px rgba(0,0,0,.2);font-size:22px}
+  #bb-panel{position:fixed;right:20px;bottom:88px;width:330px;max-height:480px;background:#fff;color:#222;
+    border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.2);display:none;overflow:hidden}
+  #bb-head{padding:10px 12px;background:#111;color:#fff;font-weight:600;display:flex;align-items:center;gap:8px}
+  #bb-log{padding:10px;height:300px;overflow:auto;white-space:pre-wrap;background:#fafafa;border-top:1px solid #eee;border-bottom:1px solid #eee}
+  #bb-input{display:flex;gap:6px;padding:10px}
+  #bb-input input{flex:1;padding:8px;border:1px solid #ddd;border-radius:8px}
+  #bb-input button{padding:8px 12px;border:none;border-radius:8px;background:#111;color:#fff;cursor:pointer}
+  .bb-msg-user{background:#e7f1ff;padding:8px;border-radius:8px;margin:6px 0}
+  .bb-msg-bot{background:#f2f2f2;padding:8px;border-radius:8px;margin:6px 0}
+</style>
+
+<div id="bb-panel" aria-live="polite">
+  <div id="bb-head">🍷 Barbare Destek</div>
+  <div id="bb-log"></div>
+  <div id="bb-input">
+    <input id="bb-text" placeholder="Mesajınızı yazın..." />
+    <button id="bb-send">Gönder</button>
+  </div>
+</div>
+
+<button id="bb-chat-btn" title="Sohbet"><span>💬</span></button>
+
+<script>
+(function(){
+  // ====== AYAR ======
+  const API_BASE = "https://eekr12.onrender.com/"; // Deploy edince sunucu URL'inle değiştir
+  // ===================
+
+  let threadId = null;
+  const $btn = document.getElementById("bb-chat-btn");
+  const $panel = document.getElementById("bb-panel");
+  const $log = document.getElementById("bb-log");
+  const $txt = document.getElementById("bb-text");
+  const $send = document.getElementById("bb-send");
+
+  const logUser = (t)=>{ const d=document.createElement("div"); d.className="bb-msg-user"; d.textContent="SEN: "+t; $log.appendChild(d); $log.scrollTop=$log.scrollHeight; };
+  const logBot  = (t)=>{ const d=document.createElement("div"); d.className="bb-msg-bot";  d.textContent="BOT: "+t; $log.appendChild(d); $log.scrollTop=$log.scrollHeight; };
+  const ensureThread = async ()=>{
+    if (threadId) return threadId;
+    const r = await fetch(API_BASE + "/api/chat/init", { method: "POST" });
+    const j = await r.json();
+    threadId = j.threadId;
+    logBot("Yeni sohbet başlatıldı. (#" + threadId.slice(-6) + ")");
+    return threadId;
+  };
+
+  const sendMsg = async ()=>{
+    const msg = ($txt.value||"").trim();
+    if (!msg) return;
+    logUser(msg);
+    $txt.value = "";
+    await ensureThread();
+    try{
+      const r = await fetch(API_BASE + "/api/chat/message", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json" },
+        body: JSON.stringify({ threadId, message: msg })
+      });
+      const j = await r.json();
+      logBot(j.message || "(Yanıt alınamadı)");
+    }catch(e){
+      logBot("Hata: " + (e?.message||e));
+    }
+  };
+
+  $btn.onclick = async ()=>{
+    const showing = $panel.style.display === "block";
+    $panel.style.display = showing ? "none" : "block";
+    if (!showing && !threadId){ try{ await ensureThread(); }catch(e){ logBot("Başlatılamadı: " + e); } }
+  };
+  $send.onclick = sendMsg;
+  $txt.addEventListener("keydown", (e)=>{ if(e.key==="Enter") sendMsg(); });
+})();
+</script>
