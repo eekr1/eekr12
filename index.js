@@ -1,10 +1,25 @@
 import express from "express";
 import cors from "cors";
+import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
+
 
 dotenv.config();
 
 const app = express();
+app.set("trust proxy", 1);
+const limiter = rateLimit({
+  windowMs: 60_000, // 1 dakika
+  max: 60,          // IP başına dakikada en fazla 60 istek
+  standardHeaders: true, // RateLimit-* header'ları
+  legacyHeaders: false,
+});
+
+app.use(limiter);
+const chatLimiter = rateLimit({ windowMs: 60_000, max: 30 });
+app.post("/api/chat/init", chatLimiter, /* handler */);
+app.post("/api/chat/message", chatLimiter, /* handler */);
+
 app.use(cors());
 app.use(express.json());
 
