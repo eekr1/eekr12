@@ -20,6 +20,9 @@ app.use((req,res,next)=>{
   });
   next();
 });
+app.use(express.static("public"));
+app.get("/", (_req,res)=> res.redirect("/test.html"));
+
 
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
