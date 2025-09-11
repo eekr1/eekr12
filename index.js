@@ -5,7 +5,7 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-const ALLOWED = ["https://eekr12.onrender.com" ,"http://localhost:8787];
+const ALLOWED = ["https://eekr12.onrender.com" ,"http://localhost:8787"];
 app.use(cors({ origin: ALLOWED, methods: ["POST"], credentials: false }));
 app.use(express.json());
 app.get("/health", (_req,res) => res.json({ ok: true, ts: Date.now() }));
