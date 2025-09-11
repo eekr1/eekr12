@@ -7,21 +7,20 @@ import dotenv from "dotenv";
 dotenv.config();
 
 const app = express();
-app.set("trust proxy", 1);
-const limiter = rateLimit({
-  windowMs: 60_000, // 1 dakika
-  max: 60,          // IP başına dakikada en fazla 60 istek
-  standardHeaders: true, // RateLimit-* header'ları
-  legacyHeaders: false,
-});
 
-app.use(limiter);
-const chatLimiter = rateLimit({ windowMs: 60_000, max: 30 });
-app.post("/api/chat/init", chatLimiter, /* handler */);
-app.post("/api/chat/message", chatLimiter, /* handler */);
+
 
 app.use(cors());
 app.use(express.json());
+app.get("/health", (_req,res) => res.json({ ok: true, ts: Date.now() }));
+app.use((req,res,next)=>{
+  const t = Date.now();
+  res.on("finish", ()=> {
+    console.log(`${req.method} ${req.url} ${res.statusCode} ${Date.now()-t}ms`);
+  });
+  next();
+});
+
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ASSISTANT_ID   = process.env.ASSISTANT_ID;
