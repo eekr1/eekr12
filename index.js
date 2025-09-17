@@ -92,19 +92,44 @@ async function openAI(path, { method = "GET", body } = {}) {
 // Assistant yanıtından handoff JSON çıkar
 function extractHandoff(text) {
   if (!text) return null;
-  // ```handoff:reservation { ... }```  veya  ```handoff:order { ... }```
-  const re = /```handoff:(reservation|order)\s*([\s\S]*?)```/i;
-  const m = text.match(re);
-  if (!m) return null;
-  const kind = m[1].toLowerCase();
-  try {
-    const payload = JSON.parse(m[2]);
-    return { kind, payload, raw: m[0] };
-  } catch (e) {
-    console.error("handoff JSON parse error:", e);
-    return null;
+
+  // 1) Önce etiketli blokları dene: ```handoff:order ...``` | ```handoff:reservation ...```
+  const tagged = /```handoff:(reservation|order)\s*([\s\S]*?)```/i.exec(text);
+  if (tagged) {
+    const kind = tagged[1].toLowerCase();
+    try {
+      const payload = JSON.parse(tagged[2]);
+      return { kind, payload, raw: tagged[0] };
+    } catch (e) {
+      console.error("handoff JSON parse error (tagged):", e);
+      // fallthrough
+    }
   }
+
+  // 2) Etiket yoksa: herhangi bir ```json ...``` bloğunu ara ve JSON parse et
+  const blocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
+  for (const m of blocks) {
+    try {
+      const payload = JSON.parse(m[1]);
+
+      // Heuristik sınıflandırma
+      const isOrder =
+        Array.isArray(payload?.items) && payload.items.length > 0;
+      const isReservation =
+        (payload?.party_size && payload?.date && payload?.time) ? true : false;
+
+      if (isOrder)  return { kind: "order",       payload, raw: m[0] };
+      if (isReservation) return { kind: "reservation", payload, raw: m[0] };
+
+      // İleride başka tipler eklenirse buraya kural konur.
+    } catch (_e) {
+      /* geçersiz JSON'sa atla */
+    }
+  }
+
+  return null;
 }
+
 
 /* ==================== Rate Limit ==================== */
 // Tüm app için hafif limit (opsiyonel)
