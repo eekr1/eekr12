@@ -237,9 +237,9 @@ app.post("/api/chat/message", chatLimiter, async (req, res) => {
       }
     }
     // JSON'u kullanıcıya göstermemek için metinden çıkar
-if (handoff?.raw) {
-  text = text.replace(handoff.raw, "").trim();
-}
+    if (handoff?.raw) {
+      text = text.replace(handoff.raw, "").trim();
+    }
 
     return res.json({
       status: "ok",
@@ -251,6 +251,146 @@ if (handoff?.raw) {
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "message_failed", detail: String(e) });
+  }
+});
+
+/* ==================== STREAMING (Typing Effect) ==================== */
+// OpenAI Assistants v2 SSE proxy: /api/chat/stream
+app.post("/api/chat/stream", chatLimiter, async (req, res) => {
+  try {
+    const { threadId, message } = req.body || {};
+    if (!threadId || !message) {
+      return res.status(400).json({ error: "missing_params", detail: "threadId and message are required" });
+    }
+
+    // SSE headers
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      // CORS gerekiyorsa, app.use(cors()) ile zaten açık
+    });
+
+    // Client bağlantısı kapatılırsa upstream'i iptal edelim
+    let clientClosed = false;
+    req.on("close", () => {
+      clientClosed = true;
+      try { res.end(); } catch {}
+    });
+
+    // 1) Kullanıcı mesajını threade ekle
+    await openAI(`/threads/${threadId}/messages`, {
+      method: "POST",
+      body: { role: "user", content: message },
+    });
+
+    // 2) Run'ı streaming modda başlat
+    const upstream = await fetch(`${OPENAI_BASE}/threads/${threadId}/runs/stream`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+        "OpenAI-Beta": "assistants=v2",
+      },
+      body: JSON.stringify({ assistant_id: ASSISTANT_ID }),
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      const errText = await upstream.text().catch(() => "");
+      throw new Error(`OpenAI stream start failed ${upstream.status}: ${errText}`);
+    }
+
+    // Gelen metni biriktireceğiz (handoff için)
+    let buffer = "";
+    let accText = "";
+    const decoder = new TextDecoder();
+
+    // 3) Upstream SSE chunklarını doğrudan client'a ilet + metni biriktir
+    for await (const chunk of upstream.body) {
+      if (clientClosed) break;
+
+      // chunk'ı olduğu gibi client'a yaz (typing effect)
+      res.write(chunk);
+
+      // Aynı anda parse etmeye çalışalım (handoff için)
+      const piece = decoder.decode(chunk, { stream: true });
+      buffer += piece;
+
+      // satırlara böl (SSE: "event:" / "data:" satırları)
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || ""; // son satır incomplete olabilir
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const dataStr = trimmed.slice(5).trim();
+        if (!dataStr || dataStr === "[DONE]") continue;
+
+        try {
+          const evt = JSON.parse(dataStr);
+          // Assistants v2 stream: delta içindeki text parçalarını yakalamaya çalış
+          // Ör: evt.delta?.content?.[i]?.text?.value
+          if (evt?.delta?.content && Array.isArray(evt.delta.content)) {
+            for (const c of evt.delta.content) {
+              if (c?.type === "text" && c?.text?.value) {
+                accText += c.text.value;
+              }
+            }
+          }
+          // Bazı event tiplerinde tamamlanmış mesaj da gelebilir:
+          // evt?.message?.content[..].text?.value  vs. onları da topla
+          if (evt?.message?.content && Array.isArray(evt.message.content)) {
+            for (const c of evt.message.content) {
+              if (c?.type === "text" && c?.text?.value) {
+                accText += c.text.value;
+              }
+            }
+          }
+        } catch (_e) {
+          // JSON parse edilemeyen satırlar olabilir, atla
+        }
+      }
+    }
+
+    // 4) Stream bitti: accText içinden handoff'ı çıkar, mail at, kullanıcıya görünmesin
+    try {
+      const handoff = extractHandoff(accText);
+      if (handoff) {
+        await sendHandoffEmail(handoff);
+        console.log(`[handoff][stream] emailed: ${handoff.kind}`);
+      }
+    } catch (e) {
+      console.error("[handoff][stream] email failed:", e);
+    }
+
+    // Bitiş
+    try { res.end(); } catch {}
+  } catch (e) {
+    console.error("stream_failed:", e);
+    // SSE hata mesajı
+    try {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: String(e) })}\n\n`);
+      res.end();
+    } catch {}
+  }
+});
+
+/* ==================== Mail Isolated Test Endpoint (opsiyonel) ==================== */
+app.post("/_mail_test", async (_req, res) => {
+  try {
+    const info = await sendHandoffEmail({
+      kind: "order",
+      payload: { full_name: "Mail Test", items: [{ sku_or_name: "Test", qty: 1 }] }
+    });
+    res.json({
+      ok: true,
+      messageId: info?.messageId,
+      accepted: info?.accepted,
+      rejected: info?.rejected,
+      response: info?.response
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: String(e) });
   }
 });
 
