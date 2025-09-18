@@ -179,6 +179,71 @@ app.post("/api/chat/message", chatLimiter, async (req, res) => {
   if (!threadId || !message) {
     return res.status(400).json({ error: "missing_params", detail: "threadId and message are required" });
   }
+// 2.bis) STREAMING: Mesaj + Run(stream) + SSE forward
+app.post("/api/chat/stream", async (req, res) => {
+  const { threadId, message } = req.body || {};
+  if (!threadId || !message) {
+    return res.status(400).json({ error: "missing_params", detail: "threadId and message are required" });
+  }
+
+  try {
+    // 1) Kullanıcı mesajını threade ekle
+    await openAI(`/threads/${threadId}/messages`, {
+      method: "POST",
+      body: { role: "user", content: message },
+    });
+
+    // 2) SSE başlıklarını ayarla
+    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
+    res.setHeader("Cache-Control", "no-cache, no-transform");
+    res.setHeader("Connection", "keep-alive");
+    // Render/NGINX gibi proxy’lerde chunk hemen gitsin
+    if (res.flushHeaders) res.flushHeaders();
+
+    // 3) Run’ı STREAM modunda başlat ve OpenAI’nin SSE’sini forward et
+    const upstream = await fetch(`${OPENAI_BASE}/threads/${threadId}/runs`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+        "OpenAI-Beta": "assistants=v2",
+        "Accept": "text/event-stream",
+      },
+      body: JSON.stringify({ assistant_id: ASSISTANT_ID, stream: true }),
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      const errTxt = await upstream.text().catch(()=> "");
+      res.write(`data: ${JSON.stringify({ error: `openai_stream_failed ${upstream.status}`, detail: errTxt.slice(0,300) })}\n\n`);
+      return res.end();
+    }
+
+    // 4) OpenAI’den gelen SSE’yi satır satır aynen ilet
+    const reader = upstream.body.getReader();
+    const decoder = new TextDecoder();
+
+    let closed = false;
+    req.on("close", () => { closed = true; try { upstream.body.cancel(); } catch {} });
+
+    while (!closed) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      const chunk = decoder.decode(value, { stream: true });
+      res.write(chunk);              // "event:" / "data:" satırlarını aynen geçiriyoruz
+    }
+
+    // 5) Bitti işareti
+    res.write("data: [DONE]\n\n");
+    return res.end();
+
+  } catch (e) {
+    console.error("stream_error:", e);
+    try {
+      res.write(`data: ${JSON.stringify({ error: "server_stream_error", detail: String(e).slice(0,300) })}\n\n`);
+    } catch {}
+    return res.end();
+  }
+});
 
   try {
     // 2.a) Mesajı threade ekle
