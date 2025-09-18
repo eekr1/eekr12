@@ -1,78 +1,227 @@
-<!-- Barbare Chat Balloon (MVP) -->
-<style>
-  #bb-chat-btn{position:fixed;right:20px;bottom:20px;width:56px;height:56px;border-radius:50%;
-    border:none;cursor:pointer;box-shadow:0 8px 20px rgba(0,0,0,.2);font-size:22px}
-  #bb-panel{position:fixed;right:20px;bottom:88px;width:330px;max-height:480px;background:#fff;color:#222;
-    border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.2);display:none;overflow:hidden}
-  #bb-head{padding:10px 12px;background:#111;color:#fff;font-weight:600;display:flex;align-items:center;gap:8px}
-  #bb-log{padding:10px;height:300px;overflow:auto;white-space:pre-wrap;background:#fafafa;border-top:1px solid #eee;border-bottom:1px solid #eee}
-  #bb-input{display:flex;gap:6px;padding:10px}
-  #bb-input input{flex:1;padding:8px;border:1px solid #ddd;border-radius:8px}
-  #bb-input button{padding:8px 12px;border:none;border-radius:8px;background:#111;color:#fff;cursor:pointer}
-  .bb-msg-user{background:#e7f1ff;padding:8px;border-radius:8px;margin:6px 0}
-  .bb-msg-bot{background:#f2f2f2;padding:8px;border-radius:8px;margin:6px 0}
-</style>
-
-<div id="bb-panel" aria-live="polite">
-  <div id="bb-head">🍷 Barbare Destek</div>
-  <div id="bb-log"></div>
-  <div id="bb-input">
-    <input id="bb-text" placeholder="Mesajınızı yazın..." />
-    <button id="bb-send">Gönder</button>
-  </div>
-</div>
-
-<button id="bb-chat-btn" title="Sohbet"><span>💬</span></button>
-
-<script>
-(function(){
-  // ====== AYAR ======
-  const API_BASE = "https://eekr12.onrender.com"; // Deploy edince sunucu URL'inle değiştir
-  // ===================
-
-  let threadId = null;
-  const $btn = document.getElementById("bb-chat-btn");
-  const $panel = document.getElementById("bb-panel");
-  const $log = document.getElementById("bb-log");
-  const $txt = document.getElementById("bb-text");
-  const $send = document.getElementById("bb-send");
-
-  const logUser = (t)=>{ const d=document.createElement("div"); d.className="bb-msg-user"; d.textContent="SEN: "+t; $log.appendChild(d); $log.scrollTop=$log.scrollHeight; };
-  const logBot  = (t)=>{ const d=document.createElement("div"); d.className="bb-msg-bot";  d.textContent="BOT: "+t; $log.appendChild(d); $log.scrollTop=$log.scrollHeight; };
-  const ensureThread = async ()=>{
-    if (threadId) return threadId;
-    const r = await fetch(API_BASE + "/api/chat/init", { method: "POST" });
-    const j = await r.json();
-    threadId = j.threadId;
-    logBot("Yeni sohbet başlatıldı. (#" + threadId.slice(-6) + ")");
-    return threadId;
-  };
-
-  const sendMsg = async ()=>{
-    const msg = ($txt.value||"").trim();
-    if (!msg) return;
-    logUser(msg);
-    $txt.value = "";
-    await ensureThread();
-    try{
-      const r = await fetch(API_BASE + "/api/chat/message", {
-        method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({ threadId, message: msg })
-      });
-      const j = await r.json();
-      logBot(j.message || "(Yanıt alınamadı)");
-    }catch(e){
-      logBot("Hata: " + (e?.message||e));
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Barbare Chat – Streaming</title>
+  <style>
+    :root { --bg:#0f172a; --panel:#111827; --muted:#6b7280; --accent:#8b5cf6; --user:#2563eb; --bot:#334155; }
+    * { box-sizing: border-box; }
+    body {
+      margin:0; font-family: ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Inter,Arial;
+      background: linear-gradient(180deg, #0b1220, #0f172a);
+      color: #e5e7eb;
+      display:flex; align-items:center; justify-content:center; min-height:100vh; padding:24px;
     }
-  };
+    .chat {
+      width: min(860px, 100%); height: min(80vh, 760px);
+      background: #0b1020aa; backdrop-filter: blur(6px);
+      border:1px solid #1f2937; border-radius: 16px; display:flex; flex-direction:column; overflow:hidden;
+      box-shadow: 0 10px 30px rgba(0,0,0,.35);
+    }
+    .header {
+      padding:14px 16px; border-bottom:1px solid #1f2937; display:flex; align-items:center; gap:10px;
+      background: #0b1020cc;
+    }
+    .dot { width:10px; height:10px; border-radius:50%; background:#10b981; box-shadow:0 0 10px #10b981aa; }
+    .title { font-weight:600; letter-spacing:.2px; }
+    .status { margin-left:auto; font-size:12px; color: var(--muted); }
+    .msgs {
+      flex:1; overflow:auto; padding:18px; display:flex; flex-direction:column; gap:12px;
+      scroll-behavior: smooth;
+    }
+    .row { display:flex; gap:10px; }
+    .row.user { justify-content:flex-end; }
+    .bubble {
+      max-width: 80%; padding:12px 14px; border-radius: 12px; line-height:1.45; white-space:pre-wrap;
+      border:1px solid #1f2937;
+    }
+    .user .bubble { background: #0b1e51; border-color:#1e3a8a; }
+    .bot .bubble  { background: #0e1628; border-color:#243244; }
+    .hint { color: var(--muted); font-size:12px; margin-top:4px; }
+    .inputbar {
+      padding:12px; border-top:1px solid #1f2937; background:#0b1020cc; display:flex; gap:8px;
+    }
+    .inputbar input {
+      flex:1; padding:12px 14px; border-radius:12px; border:1px solid #283446; background:#0e1628; color:#e5e7eb;
+      outline:none;
+    }
+    .inputbar button {
+      padding:12px 16px; border-radius:12px; border:1px solid #4c1d95; background:#5b21b6; color:#fff; cursor:pointer;
+    }
+    .inputbar button:disabled { opacity:.6; cursor:not-allowed; }
+    .toolbar { display:flex; gap:10px; align-items:center; font-size:12px; color:var(--muted); }
+    .kbd { border:1px solid #374151; background:#0b1020; padding:2px 6px; border-radius:6px; color:#9ca3af; }
+    .brand { color:#a78bfa; font-weight:600; }
+    .cursor { animation: blink 1s steps(1) infinite; }
+    @keyframes blink { 50% { opacity: 0; } }
+    a { color:#a78bfa; text-decoration:none; }
+  </style>
+</head>
+<body>
+  <div class="chat">
+    <div class="header">
+      <div class="dot"></div>
+      <div class="title">Barbare Asistan <span class="brand">• canlı</span></div>
+      <div class="status" id="status">hazır</div>
+    </div>
 
-  $btn.onclick = async ()=>{
-    const showing = $panel.style.display === "block";
-    $panel.style.display = showing ? "none" : "block";
-    if (!showing && !threadId){ try{ await ensureThread(); }catch(e){ logBot("Başlatılamadı: " + e); } }
-  };
-  $send.onclick = sendMsg;
-  $txt.addEventListener("keydown", (e)=>{ if(e.key==="Enter") sendMsg(); });
-})();
-</script>
+    <div class="msgs" id="msgs">
+      <div class="row bot">
+        <div class="bubble">Merhaba! Sorularını yanıtlamaya hazırım. ✨</div>
+      </div>
+      <div class="hint">İpucu: “Ücretsiz kargo eşiği nedir?”, “Yarın 17:00’e rezervasyon ayarlayalım mı?”</div>
+    </div>
+
+    <div class="inputbar">
+      <div class="toolbar">
+        <span class="kbd">Enter</span> gönder • <span class="kbd">Shift + Enter</span> satır
+      </div>
+      <input id="input" placeholder="Mesajınızı yazın…" autocomplete="off" />
+      <button id="send">Gönder</button>
+    </div>
+  </div>
+
+  <script>
+    // ====== Helpers ======
+    const qs = s => document.querySelector(s);
+    const msgs = qs('#msgs');
+    const input = qs('#input');
+    const sendBtn = qs('#send');
+    const statusEl = qs('#status');
+    let threadId = null;
+    let sending = false;
+
+    function appendUser(text) {
+      const row = document.createElement('div'); row.className = 'row user';
+      const b = document.createElement('div'); b.className = 'bubble'; b.textContent = text;
+      row.appendChild(b); msgs.appendChild(row); msgs.scrollTop = msgs.scrollHeight;
+    }
+    function appendAssistant(initial="") {
+      const row = document.createElement('div'); row.className = 'row bot';
+      const b = document.createElement('div'); b.className = 'bubble'; b.textContent = initial;
+      row.appendChild(b); msgs.appendChild(row); msgs.scrollTop = msgs.scrollHeight;
+      return b;
+    }
+    function setStatus(s) { statusEl.textContent = s; }
+
+    async function ensureThread() {
+      if (threadId) return threadId;
+      const r = await fetch('/api/chat/init', { method:'POST' });
+      const j = await r.json();
+      threadId = j.threadId;
+      return threadId;
+    }
+
+    // ====== Streaming fetch (SSE over fetch) ======
+    async function sendMessageStream(threadId, message, onChunk) {
+      const resp = await fetch('/api/chat/stream', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ threadId, message })
+      });
+
+      // Hata dönerse (ör. 4xx/5xx) toplu cevaba fallback atmak istersen burada yakalayabilirsin
+      if (!resp.ok || !resp.body) {
+        throw new Error('stream_response_error');
+      }
+
+      const reader = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        const chunk = decoder.decode(value, { stream:true });
+        buffer += chunk;
+
+        // SSE format satır bazlı: "data: {...}\n\n"
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const dataStr = trimmed.slice(5).trim();
+          if (!dataStr || dataStr === '[DONE]') continue;
+
+          try {
+            const evt = JSON.parse(dataStr);
+
+            // delta parçalarını topla
+            const parts = [];
+            if (evt?.delta?.content && Array.isArray(evt.delta.content)) {
+              for (const c of evt.delta.content) {
+                if (c?.type === "text" && c?.text?.value) parts.push(c.text.value);
+              }
+            }
+            if (evt?.message?.content && Array.isArray(evt.message.content)) {
+              for (const c of evt.message.content) {
+                if (c?.type === "text" && c?.text?.value) parts.push(c.text.value);
+              }
+            }
+            if (parts.length) onChunk(parts.join(""));
+          } catch(_e) { /* sessiz geç */ }
+        }
+      }
+    }
+
+    // ====== Submit flow ======
+    async function handleSend() {
+      if (sending) return;
+      const text = input.value.trim();
+      if (!text) return;
+
+      sending = true;
+      sendBtn.disabled = true;
+      input.disabled = true;
+
+      try {
+        await ensureThread();
+        appendUser(text);
+
+        // Asistan balonunu oluştur, içerik stream oldukça güncellenecek
+        const bubble = appendAssistant("");
+        let current = "";
+        setStatus('yazıyor…');
+
+        await sendMessageStream(threadId, text, (chunk) => {
+          current += chunk;
+          bubble.textContent = current + " ";
+          // küçük typing kursörü efekti:
+          bubble.innerHTML = bubble.textContent.replace(/ $/, '') + ' <span class="cursor">▌</span>';
+          msgs.scrollTop = msgs.scrollHeight;
+        });
+
+        // stream bitti → kursörü kaldır
+        bubble.textContent = (bubble.textContent || "").replace(/▌$/, '').trim();
+        setStatus('hazır');
+      } catch (err) {
+        console.error(err);
+        const b = appendAssistant("Üzgünüm, bir şeyler ters gitti. Lütfen tekrar dener misiniz? 🙏");
+        setStatus('hata');
+        setTimeout(()=> setStatus('hazır'), 1500);
+      } finally {
+        input.value = "";
+        input.disabled = false;
+        sendBtn.disabled = false;
+        input.focus();
+        sending = false;
+      }
+    }
+
+    // ====== UI events ======
+    sendBtn.addEventListener('click', handleSend);
+    input.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        handleSend();
+      }
+    });
+
+    // İlk açılışta thread’i hazırlayalım (isteğe bağlı)
+    ensureThread().catch(()=>{/* sessiz */});
+  </script>
+</body>
+</html>
