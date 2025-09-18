@@ -28,18 +28,31 @@ function escapeHtml(s = "") {
 
 async function sendHandoffEmail({ kind, payload }) {
   const subject = kind === "reservation" ? "Yeni Rezervasyon" : "Yeni Sipariş";
+
   const html = `
     <h3>${subject}</h3>
     <pre style="font-size:14px;background:#f6f6f6;padding:12px;border-radius:8px">${escapeHtml(JSON.stringify(payload, null, 2))}</pre>
     <p>Gönderim: ${new Date().toLocaleString()}</p>
   `;
-  await transporter.sendMail({
+
+  const info = await transporter.sendMail({
     from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
     to: process.env.EMAIL_TO,
     subject: `[${subject}] ${payload?.full_name || ""}`,
-    html
+    html,
+    text: `${subject}\n\n${JSON.stringify(payload, null, 2)}` // düz metin de ekleyelim
   });
+
+  // 🔎 Önemli: accepted/rejected/envelope/response logla
+  console.log("[mail] info.messageId:", info?.messageId);
+  console.log("[mail] accepted:", info?.accepted);
+  console.log("[mail] rejected:", info?.rejected);
+  console.log("[mail] envelope:", info?.envelope);
+  console.log("[mail] response:", info?.response);
+
+  return info;
 }
+
 
 /* ==================== App Middleware ==================== */
 app.set("trust proxy", 1);                // Render/Railway gerçek IP için
