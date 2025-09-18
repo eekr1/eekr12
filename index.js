@@ -236,6 +236,10 @@ app.post("/api/chat/message", chatLimiter, async (req, res) => {
         console.error("handoff email failed:", e);
       }
     }
+    // JSON'u kullanıcıya göstermemek için metinden çıkar
+if (handoff?.raw) {
+  text = text.replace(handoff.raw, "").trim();
+}
 
     return res.json({
       status: "ok",
