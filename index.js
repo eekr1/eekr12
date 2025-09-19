@@ -40,10 +40,9 @@ async function sendHandoffEmail({ kind, payload }) {
     to: process.env.EMAIL_TO,
     subject: `[${subject}] ${payload?.full_name || ""}`,
     html,
-    text: `${subject}\n\n${JSON.stringify(payload, null, 2)}` // düz metin de ekleyelim
+    text: `${subject}\n\n${JSON.stringify(payload, null, 2)}`
   });
 
-  // 🔎 Önemli: accepted/rejected/envelope/response logla
   console.log("[mail] info.messageId:", info?.messageId);
   console.log("[mail] accepted:", info?.accepted);
   console.log("[mail] rejected:", info?.rejected);
@@ -53,10 +52,9 @@ async function sendHandoffEmail({ kind, payload }) {
   return info;
 }
 
-
 /* ==================== App Middleware ==================== */
-app.set("trust proxy", 1);                // Render/Railway gerçek IP için
-app.use(cors());                          // İstersen allowlist'e çevirirsin
+app.set("trust proxy", 1);
+app.use(cors());
 app.use(express.json());
 
 // Basit request log
@@ -106,7 +104,7 @@ async function openAI(path, { method = "GET", body } = {}) {
 function extractHandoff(text) {
   if (!text) return null;
 
-  // 1) Önce etiketli blokları dene: ```handoff:order ...``` | ```handoff:reservation ...```
+  // 1) Etiketli blok: ```handoff:order ...``` | ```handoff:reservation ...```
   const tagged = /```handoff:(reservation|order)\s*([\s\S]*?)```/i.exec(text);
   if (tagged) {
     const kind = tagged[1].toLowerCase();
@@ -115,50 +113,142 @@ function extractHandoff(text) {
       return { kind, payload, raw: tagged[0] };
     } catch (e) {
       console.error("handoff JSON parse error (tagged):", e);
-      // fallthrough
     }
   }
 
-  // 2) Etiket yoksa: herhangi bir ```json ...``` bloğunu ara ve JSON parse et
+  // 2) Etiket yoksa: herhangi bir ```json ...``` bloğu
   const blocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
   for (const m of blocks) {
     try {
       const payload = JSON.parse(m[1]);
-
-      // Heuristik sınıflandırma
-      const isOrder =
-        Array.isArray(payload?.items) && payload.items.length > 0;
-      const isReservation =
-        (payload?.party_size && payload?.date && payload?.time) ? true : false;
-
-      if (isOrder)  return { kind: "order",       payload, raw: m[0] };
+      const isOrder = Array.isArray(payload?.items) && payload.items.length > 0;
+      const isReservation = !!(payload?.party_size && payload?.date && payload?.time);
+      if (isOrder)       return { kind: "order",       payload, raw: m[0] };
       if (isReservation) return { kind: "reservation", payload, raw: m[0] };
-
-      // İleride başka tipler eklenirse buraya kural konur.
-    } catch (_e) {
-      /* geçersiz JSON'sa atla */
-    }
+    } catch (_e) {}
   }
-
   return null;
 }
 
-
 /* ==================== Rate Limit ==================== */
-// Tüm app için hafif limit (opsiyonel)
 app.use(rateLimit({
   windowMs: 60_000,
-  max: 120,                 // tüm yollar toplamı
+  max: 120,
   standardHeaders: true,
   legacyHeaders: false,
 }));
 
-// Chat için daha sıkı limit
 const chatLimiter = rateLimit({
   windowMs: 60_000,
-  max: 30,                  // IP başına dakikada 30 chat isteği
+  max: 30,
   standardHeaders: true,
   legacyHeaders: false,
+});
+
+/* ==================== STREAMING (Typing Effect) ==================== */
+/* Tek ve doğru yerde tanımlı SSE proxy */
+app.post("/api/chat/stream", chatLimiter, async (req, res) => {
+  try {
+    const { threadId, message } = req.body || {};
+    if (!threadId || !message) {
+      return res.status(400).json({ error: "missing_params", detail: "threadId and message are required" });
+    }
+
+    // SSE headers (proxy buffer kapat)
+    res.writeHead(200, {
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "X-Accel-Buffering": "no"
+    });
+
+    let clientClosed = false;
+    req.on("close", () => { clientClosed = true; try { res.end(); } catch {} });
+
+    // 1) Kullanıcı mesajını threade ekle
+    await openAI(`/threads/${threadId}/messages`, {
+      method: "POST",
+      body: { role: "user", content: message },
+    });
+
+    // 2) Run'ı streaming modda başlat (resmi v2 endpoint)
+    const upstream = await fetch(`${OPENAI_BASE}/threads/${threadId}/runs/stream`, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+        "OpenAI-Beta": "assistants=v2",
+      },
+      body: JSON.stringify({ assistant_id: ASSISTANT_ID }),
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      const errText = await upstream.text().catch(() => "");
+      throw new Error(`OpenAI stream start failed ${upstream.status}: ${errText}`);
+    }
+
+    let buffer = "";
+    let accText = "";
+    const decoder = new TextDecoder();
+
+    for await (const chunk of upstream.body) {
+      if (clientClosed) break;
+
+      // chunk'ı aynen ilet (typing effect)
+      res.write(chunk);
+
+      // Handoff çıkarımı için metni biriktir
+      const piece = decoder.decode(chunk, { stream: true });
+      buffer += piece;
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed.startsWith("data:")) continue;
+        const dataStr = trimmed.slice(5).trim();
+        if (!dataStr || dataStr === "[DONE]") continue;
+
+        try {
+          const evt = JSON.parse(dataStr);
+          if (evt?.delta?.content && Array.isArray(evt.delta.content)) {
+            for (const c of evt.delta.content) {
+              if (c?.type === "text" && c?.text?.value) {
+                accText += c.text.value;
+              }
+            }
+          }
+          if (evt?.message?.content && Array.isArray(evt.message.content)) {
+            for (const c of evt.message.content) {
+              if (c?.type === "text" && c?.text?.value) {
+                accText += c.text.value;
+              }
+            }
+          }
+        } catch (_e) {}
+      }
+    }
+
+    // Stream bitti: handoff varsa e-posta
+    try {
+      const handoff = extractHandoff(accText);
+      if (handoff) {
+        await sendHandoffEmail(handoff);
+        console.log(`[handoff][stream] emailed: ${handoff.kind}`);
+      }
+    } catch (e) {
+      console.error("[handoff][stream] email failed:", e);
+    }
+
+    try { res.end(); } catch {}
+  } catch (e) {
+    console.error("stream_failed:", e);
+    try {
+      res.write(`event: error\ndata: ${JSON.stringify({ error: String(e) })}\n\n`);
+      res.end();
+    } catch {}
+  }
 });
 
 /* ==================== Routes ==================== */
@@ -173,77 +263,12 @@ app.post("/api/chat/init", chatLimiter, async (req, res) => {
   }
 });
 
-// 2) Mesaj gönder + run başlat + poll + yanıtı getir
+// 2) Mesaj gönder + run başlat + poll + yanıtı getir (non-stream)
 app.post("/api/chat/message", chatLimiter, async (req, res) => {
   const { threadId, message } = req.body || {};
   if (!threadId || !message) {
     return res.status(400).json({ error: "missing_params", detail: "threadId and message are required" });
   }
-// 2.bis) STREAMING: Mesaj + Run(stream) + SSE forward
-app.post("/api/chat/stream", async (req, res) => {
-  const { threadId, message } = req.body || {};
-  if (!threadId || !message) {
-    return res.status(400).json({ error: "missing_params", detail: "threadId and message are required" });
-  }
-
-  try {
-    // 1) Kullanıcı mesajını threade ekle
-    await openAI(`/threads/${threadId}/messages`, {
-      method: "POST",
-      body: { role: "user", content: message },
-    });
-
-    // 2) SSE başlıklarını ayarla
-    res.setHeader("Content-Type", "text/event-stream; charset=utf-8");
-    res.setHeader("Cache-Control", "no-cache, no-transform");
-    res.setHeader("Connection", "keep-alive");
-    // Render/NGINX gibi proxy’lerde chunk hemen gitsin
-    if (res.flushHeaders) res.flushHeaders();
-
-    // 3) Run’ı STREAM modunda başlat ve OpenAI’nin SSE’sini forward et
-    const upstream = await fetch(`${OPENAI_BASE}/threads/${threadId}/runs`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-        "OpenAI-Beta": "assistants=v2",
-        "Accept": "text/event-stream",
-      },
-      body: JSON.stringify({ assistant_id: ASSISTANT_ID, stream: true }),
-    });
-
-    if (!upstream.ok || !upstream.body) {
-      const errTxt = await upstream.text().catch(()=> "");
-      res.write(`data: ${JSON.stringify({ error: `openai_stream_failed ${upstream.status}`, detail: errTxt.slice(0,300) })}\n\n`);
-      return res.end();
-    }
-
-    // 4) OpenAI’den gelen SSE’yi satır satır aynen ilet
-    const reader = upstream.body.getReader();
-    const decoder = new TextDecoder();
-
-    let closed = false;
-    req.on("close", () => { closed = true; try { upstream.body.cancel(); } catch {} });
-
-    while (!closed) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      const chunk = decoder.decode(value, { stream: true });
-      res.write(chunk);              // "event:" / "data:" satırlarını aynen geçiriyoruz
-    }
-
-    // 5) Bitti işareti
-    res.write("data: [DONE]\n\n");
-    return res.end();
-
-  } catch (e) {
-    console.error("stream_error:", e);
-    try {
-      res.write(`data: ${JSON.stringify({ error: "server_stream_error", detail: String(e).slice(0,300) })}\n\n`);
-    } catch {}
-    return res.end();
-  }
-});
 
   try {
     // 2.a) Mesajı threade ekle
@@ -262,7 +287,7 @@ app.post("/api/chat/stream", async (req, res) => {
     let runStatus = run.status;
     const runId = run.id;
     const started = Date.now();
-    const TIMEOUT_MS = 60_000; // 60 sn
+    const TIMEOUT_MS = 60_000;
 
     while (runStatus !== "completed") {
       if (Date.now() - started > TIMEOUT_MS) {
@@ -280,7 +305,7 @@ app.post("/api/chat/stream", async (req, res) => {
     const msgs = await openAI(`/threads/${threadId}/messages?order=desc&limit=10`);
     const assistantMsg = (msgs.data || []).find(m => m.role === "assistant");
 
-    // İçerik metnini ayıkla (text parçaları)
+    // İçerik metnini ayıkla
     let text = "";
     if (assistantMsg?.content) {
       for (const part of assistantMsg.content) {
@@ -300,143 +325,20 @@ app.post("/api/chat/stream", async (req, res) => {
       } catch (e) {
         console.error("handoff email failed:", e);
       }
-    }
-    // JSON'u kullanıcıya göstermemek için metinden çıkar
-    if (handoff?.raw) {
-      text = text.replace(handoff.raw, "").trim();
+      // JSON'u kullanıcıya göstermemek için metinden çıkar
+      if (handoff?.raw) text = text.replace(handoff.raw, "").trim();
     }
 
     return res.json({
       status: "ok",
       threadId,
       message: text || "(Yanıt metni bulunamadı)",
-      handoff: handoff ? { kind: handoff.kind } : null, // UI isterse görsün
+      handoff: handoff ? { kind: handoff.kind } : null,
       raw: assistantMsg || null,
     });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "message_failed", detail: String(e) });
-  }
-});
-
-/* ==================== STREAMING (Typing Effect) ==================== */
-// OpenAI Assistants v2 SSE proxy: /api/chat/stream
-app.post("/api/chat/stream", chatLimiter, async (req, res) => {
-  try {
-    const { threadId, message } = req.body || {};
-    if (!threadId || !message) {
-      return res.status(400).json({ error: "missing_params", detail: "threadId and message are required" });
-    }
-
-    // SSE headers
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive",
-      // CORS gerekiyorsa, app.use(cors()) ile zaten açık
-    });
-
-    // Client bağlantısı kapatılırsa upstream'i iptal edelim
-    let clientClosed = false;
-    req.on("close", () => {
-      clientClosed = true;
-      try { res.end(); } catch {}
-    });
-
-    // 1) Kullanıcı mesajını threade ekle
-    await openAI(`/threads/${threadId}/messages`, {
-      method: "POST",
-      body: { role: "user", content: message },
-    });
-
-    // 2) Run'ı streaming modda başlat
-    const upstream = await fetch(`${OPENAI_BASE}/threads/${threadId}/runs/stream`, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-        "OpenAI-Beta": "assistants=v2",
-      },
-      body: JSON.stringify({ assistant_id: ASSISTANT_ID }),
-    });
-
-    if (!upstream.ok || !upstream.body) {
-      const errText = await upstream.text().catch(() => "");
-      throw new Error(`OpenAI stream start failed ${upstream.status}: ${errText}`);
-    }
-
-    // Gelen metni biriktireceğiz (handoff için)
-    let buffer = "";
-    let accText = "";
-    const decoder = new TextDecoder();
-
-    // 3) Upstream SSE chunklarını doğrudan client'a ilet + metni biriktir
-    for await (const chunk of upstream.body) {
-      if (clientClosed) break;
-
-      // chunk'ı olduğu gibi client'a yaz (typing effect)
-      res.write(chunk);
-
-      // Aynı anda parse etmeye çalışalım (handoff için)
-      const piece = decoder.decode(chunk, { stream: true });
-      buffer += piece;
-
-      // satırlara böl (SSE: "event:" / "data:" satırları)
-      const lines = buffer.split("\n");
-      buffer = lines.pop() || ""; // son satır incomplete olabilir
-
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const dataStr = trimmed.slice(5).trim();
-        if (!dataStr || dataStr === "[DONE]") continue;
-
-        try {
-          const evt = JSON.parse(dataStr);
-          // Assistants v2 stream: delta içindeki text parçalarını yakalamaya çalış
-          // Ör: evt.delta?.content?.[i]?.text?.value
-          if (evt?.delta?.content && Array.isArray(evt.delta.content)) {
-            for (const c of evt.delta.content) {
-              if (c?.type === "text" && c?.text?.value) {
-                accText += c.text.value;
-              }
-            }
-          }
-          // Bazı event tiplerinde tamamlanmış mesaj da gelebilir:
-          // evt?.message?.content[..].text?.value  vs. onları da topla
-          if (evt?.message?.content && Array.isArray(evt.message.content)) {
-            for (const c of evt.message.content) {
-              if (c?.type === "text" && c?.text?.value) {
-                accText += c.text.value;
-              }
-            }
-          }
-        } catch (_e) {
-          // JSON parse edilemeyen satırlar olabilir, atla
-        }
-      }
-    }
-
-    // 4) Stream bitti: accText içinden handoff'ı çıkar, mail at, kullanıcıya görünmesin
-    try {
-      const handoff = extractHandoff(accText);
-      if (handoff) {
-        await sendHandoffEmail(handoff);
-        console.log(`[handoff][stream] emailed: ${handoff.kind}`);
-      }
-    } catch (e) {
-      console.error("[handoff][stream] email failed:", e);
-    }
-
-    // Bitiş
-    try { res.end(); } catch {}
-  } catch (e) {
-    console.error("stream_failed:", e);
-    // SSE hata mesajı
-    try {
-      res.write(`event: error\ndata: ${JSON.stringify({ error: String(e) })}\n\n`);
-      res.end();
-    } catch {}
   }
 });
 
