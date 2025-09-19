@@ -145,8 +145,8 @@ const chatLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-/* ==================== STREAMING (Typing Effect) ==================== */
-/* Tek ve doğru yerde tanımlı SSE proxy */
+/* ==================== STREAMING (Typing Effect) — DÜZELTİLMİŞ ==================== */
+/* Tek ve doğru yerde tanımlı SSE proxy: /threads/{threadId}/runs  + stream:true */
 app.post("/api/chat/stream", chatLimiter, async (req, res) => {
   try {
     const { threadId, message } = req.body || {};
@@ -154,12 +154,12 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
       return res.status(400).json({ error: "missing_params", detail: "threadId and message are required" });
     }
 
-    // SSE headers (proxy buffer kapat)
+    // SSE başlıkları (proxy buffer’ları kapat)
     res.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
       "Connection": "keep-alive",
-      "X-Accel-Buffering": "no"
+      "X-Accel-Buffering": "no",
     });
 
     let clientClosed = false;
@@ -171,15 +171,17 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
       body: { role: "user", content: message },
     });
 
-    // 2) Run'ı streaming modda başlat (resmi v2 endpoint)
-    const upstream = await fetch(`${OPENAI_BASE}/threads/${threadId}/runs/stream`, {
+    // 2) Run'ı STREAM modda başlat (DOĞRU YÖNTEM)
+    //    /threads/{threadId}/runs  +  body: { assistant_id, stream:true }
+    const upstream = await fetch(`${OPENAI_BASE}/threads/${threadId}/runs`, {
       method: "POST",
       headers: {
         "Authorization": `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
         "OpenAI-Beta": "assistants=v2",
+        "Accept": "text/event-stream",
       },
-      body: JSON.stringify({ assistant_id: ASSISTANT_ID }),
+      body: JSON.stringify({ assistant_id: ASSISTANT_ID, stream: true }),
     });
 
     if (!upstream.ok || !upstream.body) {
@@ -187,18 +189,22 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
       throw new Error(`OpenAI stream start failed ${upstream.status}: ${errText}`);
     }
 
+    // Handoff tespiti için metni biriktirelim
     let buffer = "";
     let accText = "";
     const decoder = new TextDecoder();
 
-    for await (const chunk of upstream.body) {
-      if (clientClosed) break;
+    // 3) OpenAI’den gelen SSE’yi olduğu gibi forward et + text’i parçalar halinde topla
+    const reader = upstream.body.getReader();
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-      // chunk'ı aynen ilet (typing effect)
-      res.write(chunk);
+      // chunk'ı müşteriye aktar (typing effect)
+      res.write(value);
 
-      // Handoff çıkarımı için metni biriktir
-      const piece = decoder.decode(chunk, { stream: true });
+      // aynı anda parse etmeye çalış (handoff için)
+      const piece = decoder.decode(value, { stream: true });
       buffer += piece;
 
       const lines = buffer.split("\n");
@@ -212,25 +218,25 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
 
         try {
           const evt = JSON.parse(dataStr);
+          // delta parçaları
           if (evt?.delta?.content && Array.isArray(evt.delta.content)) {
             for (const c of evt.delta.content) {
-              if (c?.type === "text" && c?.text?.value) {
-                accText += c.text.value;
-              }
+              if (c?.type === "text" && c?.text?.value) accText += c.text.value;
             }
           }
+          // tamamlanmış bloklar
           if (evt?.message?.content && Array.isArray(evt.message.content)) {
             for (const c of evt.message.content) {
-              if (c?.type === "text" && c?.text?.value) {
-                accText += c.text.value;
-              }
+              if (c?.type === "text" && c?.text?.value) accText += c.text.value;
             }
           }
-        } catch (_e) {}
+        } catch (_) {}
       }
+
+      if (clientClosed) break;
     }
 
-    // Stream bitti: handoff varsa e-posta
+    // 4) Stream bitti → handoff varsa maille
     try {
       const handoff = extractHandoff(accText);
       if (handoff) {
@@ -241,7 +247,7 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
       console.error("[handoff][stream] email failed:", e);
     }
 
-    try { res.end(); } catch {}
+    try { res.write("data: [DONE]\n\n"); res.end(); } catch {}
   } catch (e) {
     console.error("stream_failed:", e);
     try {
