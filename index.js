@@ -79,11 +79,25 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ASSISTANT_ID   = process.env.ASSISTANT_ID;
 const OPENAI_BASE    = process.env.OPENAI_BASE || "https://api.openai.com/v1";
 const PORT           = process.env.PORT || 8787;
-const BRANDS = JSON.parse(process.env.BRAND_JSON || "{}");
 
 if (!OPENAI_API_KEY || !ASSISTANT_ID) {
   console.error("Missing OPENAI_API_KEY or ASSISTANT_ID in .env");
   process.exit(1);
+}
+
+/* ==================== Brand Config (accept both BRAND_JSON & BRANDS_JSON) ==================== */
+let BRANDS = {};
+try {
+  const raw = process.env.BRAND_JSON || process.env.BRANDS_JSON || "{}";
+  BRANDS = JSON.parse(raw);
+} catch (e) {
+  console.warn("[brand] JSON parse error:", e?.message || e);
+}
+console.log("[brand] keys:", Object.keys(BRANDS || {}));
+
+function getBrandConfig(brandKey) {
+  if (!brandKey) return null;
+  return BRANDS[brandKey] || null;
 }
 
 // Bilinmeyen key'i reddet (whitelist)
@@ -178,6 +192,8 @@ const chatLimiter = rateLimit({
 app.post("/api/chat/stream", chatLimiter, async (req, res) => {
   try {
     const { threadId, message, brandKey } = req.body || {};
+    console.log("[brand] incoming:", { brandKey });
+
     if (!threadId || !message) {
       return res.status(400).json({ error: "missing_params", detail: "threadId and message are required" });
     }
@@ -330,6 +346,8 @@ app.post("/api/chat/init", chatLimiter, async (req, res) => {
 // 2) Mesaj gönder + run başlat + poll + yanıtı getir  (brandKey destekli)
 app.post("/api/chat/message", chatLimiter, async (req, res) => {
   const { threadId, message, brandKey } = req.body || {};
+  console.log("[brand] incoming:", { brandKey });
+
   if (!threadId || !message) {
     return res.status(400).json({ error: "missing_params", detail: "threadId and message are required" });
   }
