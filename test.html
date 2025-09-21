@@ -279,7 +279,9 @@
     async function ensureThread(){
       if (threadId) return threadId;
       setStatus("başlatılıyor…","wait");
-      const r = await fetch(API_BASE + "/api/chat/init", { method:"POST" });
+      const r = await fetch(API_BASE + "/api/chat/init", { method:"POST", method: "POST",
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify({ brandKey: BRAND_KEY }) });
       if (!r.ok) throw new Error("init_failed");
       const j = await r.json();
       threadId = j.threadId;
