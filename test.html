@@ -292,7 +292,7 @@
       const resp = await fetch(API_BASE + "/api/chat/stream", {
         method:"POST",
         headers:{ "Content-Type":"application/json", "Accept":"text/event-stream" },
-        body: JSON.stringify({ threadId, message })
+        body: JSON.stringify({ threadId, message, brandKey: "barbare" })
       });
       if (!resp.ok || !resp.body) throw new Error("stream_response_error");
 
@@ -366,7 +366,7 @@
           const r = await fetch(API_BASE + "/api/chat/message", {
             method:"POST",
             headers:{ "Content-Type":"application/json" },
-            body: JSON.stringify({ threadId, message: msg })
+            body: JSON.stringify({ threadId, message: msg, brandKey: "barbare" })
           });
           const j = await r.json();
           node.bubble.textContent = j.message || "(Yanıt alınamadı)";
