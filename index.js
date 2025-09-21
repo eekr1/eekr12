@@ -79,18 +79,11 @@ const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
 const ASSISTANT_ID   = process.env.ASSISTANT_ID;
 const OPENAI_BASE    = process.env.OPENAI_BASE || "https://api.openai.com/v1";
 const PORT           = process.env.PORT || 8787;
+const BRANDS = JSON.parse(process.env.BRAND_JSON || "{}");
 
 if (!OPENAI_API_KEY || !ASSISTANT_ID) {
   console.error("Missing OPENAI_API_KEY or ASSISTANT_ID in .env");
   process.exit(1);
-}
-
-// === Brand map (ENV'den) ===
-let BRANDS = {};
-try {
-  BRANDS = JSON.parse(process.env.BRANDS_JSON || "{}");
-} catch (e) {
-  console.warn("[brand] BRANDS_JSON parse edilemedi:", e?.message || e);
 }
 
 // Bilinmeyen key'i reddet (whitelist)
