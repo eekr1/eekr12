@@ -317,7 +317,7 @@ app.post("/api/chat/init", chatLimiter, async (req, res) => {
     // (İsteyenler thread metadata'ya brandKey yazabilir;
     // Assistants API threads metadata desteği varsa ileride kullanırız.)
 
-    const thread = await openAI("/threads", { method: "POST", body: { metadata: { brandKey } } });
+    const thread = await openAI("/threads", { method: "POST", body: {} });
     return res.json({ threadId: thread.id, brandKey });
   } catch (e) {
     console.error(e);
