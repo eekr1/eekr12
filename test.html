@@ -206,6 +206,7 @@
   </div>
 
   <script>
+    const BRAND_KEY = "barbare";   // yukarıda sabit tanımlıyorsun
   (function(){
     /* ====== AYAR ====== */
     const RAW_API_BASE = "https://eekr12.onrender.com";   // sadece bunu değiştirmen gerekirse değiştir
@@ -275,7 +276,6 @@
     function escape(s=""){
       return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
     }
-const BRAND_KEY = "barbare";   // yukarıda sabit tanımlıyorsun
 
     async function ensureThread(){
       if (threadId) return threadId;
