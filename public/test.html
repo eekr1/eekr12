@@ -1,78 +1,399 @@
-<!-- Barbare Chat Balloon (MVP) -->
-<style>
-  #bb-chat-btn{position:fixed;right:20px;bottom:20px;width:56px;height:56px;border-radius:50%;
-    border:none;cursor:pointer;box-shadow:0 8px 20px rgba(0,0,0,.2);font-size:22px}
-  #bb-panel{position:fixed;right:20px;bottom:88px;width:330px;max-height:480px;background:#fff;color:#222;
-    border-radius:16px;box-shadow:0 10px 30px rgba(0,0,0,.2);display:none;overflow:hidden}
-  #bb-head{padding:10px 12px;background:#111;color:#fff;font-weight:600;display:flex;align-items:center;gap:8px}
-  #bb-log{padding:10px;height:300px;overflow:auto;white-space:pre-wrap;background:#fafafa;border-top:1px solid #eee;border-bottom:1px solid #eee}
-  #bb-input{display:flex;gap:6px;padding:10px}
-  #bb-input input{flex:1;padding:8px;border:1px solid #ddd;border-radius:8px}
-  #bb-input button{padding:8px 12px;border:none;border-radius:8px;background:#111;color:#fff;cursor:pointer}
-  .bb-msg-user{background:#e7f1ff;padding:8px;border-radius:8px;margin:6px 0}
-  .bb-msg-bot{background:#f2f2f2;padding:8px;border-radius:8px;margin:6px 0}
-</style>
-
-<div id="bb-panel" aria-live="polite">
-  <div id="bb-head">🍷 Barbare Destek</div>
-  <div id="bb-log"></div>
-  <div id="bb-input">
-    <input id="bb-text" placeholder="Mesajınızı yazın..." />
-    <button id="bb-send">Gönder</button>
-  </div>
-</div>
-
-<button id="bb-chat-btn" title="Sohbet"><span>💬</span></button>
-
-<script>
-(function(){
-  // ====== AYAR ======
-  const API_BASE = "https://eekr12.onrender.com"; // Deploy edince sunucu URL'inle değiştir
-  // ===================
-
-  let threadId = null;
-  const $btn = document.getElementById("bb-chat-btn");
-  const $panel = document.getElementById("bb-panel");
-  const $log = document.getElementById("bb-log");
-  const $txt = document.getElementById("bb-text");
-  const $send = document.getElementById("bb-send");
-
-  const logUser = (t)=>{ const d=document.createElement("div"); d.className="bb-msg-user"; d.textContent="SEN: "+t; $log.appendChild(d); $log.scrollTop=$log.scrollHeight; };
-  const logBot  = (t)=>{ const d=document.createElement("div"); d.className="bb-msg-bot";  d.textContent="BOT: "+t; $log.appendChild(d); $log.scrollTop=$log.scrollHeight; };
-  const ensureThread = async ()=>{
-    if (threadId) return threadId;
-    const r = await fetch(API_BASE + "/api/chat/init", { method: "POST" });
-    const j = await r.json();
-    threadId = j.threadId;
-    logBot("Yeni sohbet başlatıldı. (#" + threadId.slice(-6) + ")");
-    return threadId;
-  };
-
-  const sendMsg = async ()=>{
-    const msg = ($txt.value||"").trim();
-    if (!msg) return;
-    logUser(msg);
-    $txt.value = "";
-    await ensureThread();
-    try{
-      const r = await fetch(API_BASE + "/api/chat/message", {
-        method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({ threadId, message: msg })
-      });
-      const j = await r.json();
-      logBot(j.message || "(Yanıt alınamadı)");
-    }catch(e){
-      logBot("Hata: " + (e?.message||e));
+<!doctype html>
+<html lang="tr">
+<head>
+  <meta charset="utf-8" />
+  <title>Barbare Asistan • Canlı Destek</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root{
+      --bg:#0b1020;
+      --panel:#0e1528;
+      --card:#0f1830;
+      --line:#1f2a44;
+      --text:#e8eefb;
+      --muted:#a8b3c7;
+      --accent:#9b87f5;
+      --accent-2:#7c6bf0;
+      --user:#1f3b75;
+      --bot:#0e1f38;
+      --ok:#10b981;
+      --warn:#f59e0b;
+      --err:#ef4444;
     }
-  };
+    *{box-sizing:border-box}
+    body{
+      margin:0; font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", Inter, Roboto, Arial;
+      color:var(--text); background:
+        radial-gradient(1000px 600px at 100% 0%, rgba(155,135,245,.12), transparent 50%),
+        linear-gradient(180deg,#0a0f1d,#0b1222 50%, #0a0f1d);
+      min-height:100vh;
+      display:flex; align-items:center; justify-content:center; padding:24px;
+    }
 
-  $btn.onclick = async ()=>{
-    const showing = $panel.style.display === "block";
-    $panel.style.display = showing ? "none" : "block";
-    if (!showing && !threadId){ try{ await ensureThread(); }catch(e){ logBot("Başlatılamadı: " + e); } }
-  };
-  $send.onclick = sendMsg;
-  $txt.addEventListener("keydown", (e)=>{ if(e.key==="Enter") sendMsg(); });
-})();
-</script>
+    /* WRAPPER */
+    .chat-wrap{
+      width:min(920px, 100%);
+      display:grid; grid-template-columns: 360px 1fr; gap:18px;
+    }
+    @media (max-width: 860px){ .chat-wrap{ grid-template-columns: 1fr; } }
+
+    /* LEFT CARD (Brand) */
+    .brand-card{
+      background:linear-gradient(180deg, #0e162b, #0d1426);
+      border:1px solid var(--line);
+      border-radius:18px; padding:18px;
+      box-shadow:0 12px 30px rgba(0,0,0,.35);
+    }
+    .brand-row{ display:flex; align-items:center; gap:12px }
+    .brand-logo{
+      width:42px;height:42px;border-radius:12px;
+      background:linear-gradient(135deg, #a78bfa, #7c6bf0);
+      display:flex; align-items:center; justify-content:center; font-weight:800; color:#121628;
+      box-shadow:0 6px 18px rgba(124,107,240,.35);
+    }
+    .brand-title{ font-weight:800; letter-spacing:.3px }
+    .brand-sub{ font-size:13px; color:var(--muted) }
+
+    .brand-badges{ display:flex; gap:8px; margin-top:12px; flex-wrap:wrap }
+    .badge{
+      font-size:12px; padding:6px 10px; border:1px solid var(--line); border-radius:999px; color:#dfe6ff;
+      background:#0e1629;
+    }
+    .hint{
+      margin-top:14px; font-size:13px; color:var(--muted); line-height:1.6
+    }
+
+    /* PANEL */
+    .panel{
+      background:linear-gradient(180deg, #0e162b, #0d1426);
+      border:1px solid var(--line);
+      border-radius:18px; overflow:hidden;
+      box-shadow:0 16px 40px rgba(0,0,0,.45);
+      display:flex; flex-direction:column; min-height:520px; max-height:78vh;
+    }
+    .head{
+      display:flex; align-items:center; gap:12px; padding:12px 14px; border-bottom:1px solid var(--line);
+      background:linear-gradient(180deg, #0f1732, #0e162b);
+    }
+    .status-dot{
+      width:10px;height:10px;border-radius:50%; background:var(--ok);
+      box-shadow:0 0 10px #10b981aa;
+    }
+    .title{ font-weight:800; letter-spacing:.25px }
+    .sub{ margin-left:auto; font-size:12px; color:var(--muted) }
+
+    /* MESSAGES */
+    .msgs{
+      padding:16px; overflow:auto; height:100%; min-height:340px;
+      background:
+        radial-gradient(1200px 600px at 100% 0%, rgba(155,135,245,.08), transparent 55%) ,
+        transparent;
+    }
+    .row{ display:flex; align-items:flex-end; gap:10px; margin:8px 0; }
+    .row.user{ justify-content:flex-end }
+    .avatar{
+      width:36px;height:36px;border-radius:50%;
+      background:#15254a; display:flex; align-items:center; justify-content:center; font-size:16px;
+      border:1px solid var(--line);
+    }
+    .avatar.bot{ background:#111c34 }
+    .bubble{
+      max-width:76%; padding:12px 14px; line-height:1.55; font-size:14.5px;
+      border-radius:14px; border:1px solid var(--line); color:#dfe6ff; position:relative;
+      word-wrap: break-word; white-space:pre-wrap;
+    }
+    .row.bot .bubble{ background:var(--bot) }
+    .row.user .bubble{ background:var(--user) }
+    .row.bot .bubble::after{
+      content:""; position:absolute; left:-8px; bottom:8px; width:0; height:0;
+      border-right: 8px solid var(--bot);
+      border-top: 8px solid transparent; border-bottom: 8px solid transparent;
+      filter: drop-shadow(-1px 0 0 var(--line));
+    }
+    .row.user .bubble::after{
+      content:""; position:absolute; right:-8px; bottom:8px; width:0; height:0;
+      border-left: 8px solid var(--user);
+      border-top: 8px solid transparent; border-bottom: 8px solid transparent;
+      filter: drop-shadow(1px 0 0 var(--line));
+    }
+    .meta{ font-size:11px; color:var(--muted); margin:4px 6px }
+
+    /* INPUT */
+    .input{
+      padding:12px; border-top:1px solid var(--line); background:#0e1629; display:flex; gap:10px;
+    }
+    textarea{
+      flex:1; resize:none; min-height:44px; max-height:140px;
+      padding:10px 12px; border-radius:12px; border:1px solid #223049; background:#0b1324; color:var(--text);
+      outline:none; box-shadow: inset 0 0 0 1px transparent; transition:.2s box-shadow, .2s border-color;
+    }
+    textarea:focus{ border-color:#33477a; box-shadow: inset 0 0 0 1px #33477a }
+    .send{
+      min-width:110px; border-radius:12px; border:1px solid #4b31c2;
+      background:linear-gradient(180deg, var(--accent), var(--accent-2)); color:#fff; font-weight:700; cursor:pointer;
+      padding:0 16px; height:44px; box-shadow:0 8px 24px rgba(124,107,240,.25); transition:.2s transform, .2s filter;
+    }
+    .send:active{ transform: translateY(1px) }
+    .send:disabled{ opacity:.65; cursor:not-allowed }
+
+    /* Typing dots */
+    .typing{
+      display:inline-flex; gap:4px; align-items:center; padding:8px 0 0 0;
+    }
+    .dot{
+      width:6px;height:6px;border-radius:50%; background:#96a7c6; opacity:.25;
+      animation: blink 1.2s infinite;
+    }
+    .dot:nth-child(2){ animation-delay:.2s }
+    .dot:nth-child(3){ animation-delay:.4s }
+    @keyframes blink{ 0%, 100% { opacity:.25 } 50% { opacity:1 } }
+
+    /* Utility */
+    .fade-in{ animation: fi .2s ease-out both }
+    @keyframes fi{ from{ opacity:0; transform:translateY(4px) } to{ opacity:1; transform:translateY(0) } }
+    a{ color:#c7b5ff; text-decoration:none }
+  </style>
+</head>
+<body>
+
+  <div class="chat-wrap">
+    <!-- SOL: Marka Kartı -->
+    <div class="brand-card">
+      <div class="brand-row">
+        <div class="brand-logo">B</div>
+        <div>
+          <div class="brand-title">Barbare Asistan</div>
+          <div class="brand-sub">Müşteri Hizmetleri • Yapay Zeka</div>
+        </div>
+      </div>
+      <div class="brand-badges">
+        <div class="badge">güvenli yanıt</div>
+        <div class="badge">RAG / kaynaklı</div>
+        <div class="badge">rez/sipariş handoff</div>
+        <div class="badge">typing effect</div>
+      </div>
+      <div class="hint">
+        Örnek sorular:<br/>
+        • “Ücretsiz kargo eşiği nedir?”<br/>
+        • “Yarın 17:00 için 2 kişilik rezervasyon alabilir miyiz?”<br/>
+        • “20 şişe Prestige sipariş vermek istiyorum.”<br/>
+      </div>
+    </div>
+
+    <!-- SAĞ: Sohbet Paneli -->
+    <div class="panel">
+      <div class="head">
+        <div class="status-dot" id="statusDot" title="hazır"></div>
+        <div class="title">🍷 Barbare Destek</div>
+        <div class="sub" id="statusText">hazır</div>
+      </div>
+
+      <div class="msgs" id="msgs">
+        <div class="row bot fade-in">
+          <div class="avatar bot">🤖</div>
+          <div>
+            <div class="bubble">Merhaba! Barbare ile ilgili sorularınızı memnuniyetle yanıtlarım. 😊</div>
+            <div class="meta">Asistan • şimdi</div>
+          </div>
+        </div>
+      </div>
+
+      <div class="input">
+        <textarea id="text" placeholder="Mesajınızı yazın… (Enter: gönder • Shift+Enter: satır)"></textarea>
+        <button id="send" class="send">Gönder</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+  (function(){
+    /* ====== AYAR ====== */
+    const RAW_API_BASE = "https://eekr12.onrender.com";   // sadece bunu değiştirmen gerekirse değiştir
+    const API_BASE = RAW_API_BASE.replace(/\/+$/,'');
+    /* ================== */
+
+    // State
+    let threadId = null;
+    let sending  = false;
+
+    // DOM
+    const $msgs  = document.getElementById("msgs");
+    const $txt   = document.getElementById("text");
+    const $send  = document.getElementById("send");
+    const $sText = document.getElementById("statusText");
+    const $sDot  = document.getElementById("statusDot");
+
+    function setStatus(text, color){
+      $sText.textContent = text;
+      if (color === "ok")      { $sDot.style.background = "var(--ok)"; }
+      else if (color === "err"){ $sDot.style.background = "var(--err)"; }
+      else if (color === "wait"){ $sDot.style.background = "#93c5fd"; }
+      else { $sDot.style.background = "var(--ok)"; }
+    }
+    function scrollEnd(){ $msgs.scrollTop = $msgs.scrollHeight; }
+
+    function addUser(text){
+      const row = document.createElement("div");
+      row.className = "row user fade-in";
+      row.innerHTML = `
+        <div>
+          <div class="bubble">${escape(text)}</div>
+          <div class="meta">Sen • şimdi</div>
+        </div>
+        <div class="avatar">🧑</div>
+      `;
+      $msgs.appendChild(row); scrollEnd();
+    }
+
+    function addBotSkeleton(){
+      const row = document.createElement("div");
+      row.className = "row bot fade-in";
+      row.innerHTML = `
+        <div class="avatar bot">🤖</div>
+        <div>
+          <div class="bubble" id="bot-bubble"></div>
+          <div class="meta" id="bot-meta">Asistan • yazıyor…</div>
+          <div class="typing" id="bot-typing">
+            <span class="dot"></span><span class="dot"></span><span class="dot"></span>
+          </div>
+        </div>
+      `;
+      $msgs.appendChild(row); scrollEnd();
+      return {
+        bubble: row.querySelector("#bot-bubble"),
+        meta:   row.querySelector("#bot-meta"),
+        typing: row.querySelector("#bot-typing"),
+      };
+    }
+
+    function finishBot(node){
+      if (node.typing && node.typing.parentNode) node.typing.parentNode.removeChild(node.typing);
+      node.meta.textContent = "Asistan • şimdi";
+      scrollEnd();
+    }
+
+    function escape(s=""){
+      return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+    }
+
+    async function ensureThread(){
+      if (threadId) return threadId;
+      setStatus("başlatılıyor…","wait");
+      const r = await fetch(API_BASE + "/api/chat/init", { method:"POST" });
+      if (!r.ok) throw new Error("init_failed");
+      const j = await r.json();
+      threadId = j.threadId;
+      setStatus("hazır","ok");
+      return threadId;
+    }
+
+    // Streaming (SSE) okuyucu
+    async function sendMessageStream(threadId, message, onChunk){
+      const resp = await fetch(API_BASE + "/api/chat/stream", {
+        method:"POST",
+        headers:{ "Content-Type":"application/json", "Accept":"text/event-stream" },
+        body: JSON.stringify({ threadId, message })
+      });
+      if (!resp.ok || !resp.body) throw new Error("stream_response_error");
+
+      const reader  = resp.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+
+      while (true){
+        const { done, value } = await reader.read();
+        if (done) break;
+
+        const chunk = decoder.decode(value, { stream:true });
+        buffer += chunk;
+
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+
+        for (const line of lines) {
+          const ln = line.trim();
+          if (!ln.startsWith("data:")) continue;
+          const dataStr = ln.slice(5).trim();
+          if (!dataStr || dataStr === "[DONE]") continue;
+
+          try{
+            const evt = JSON.parse(dataStr);
+            const parts = [];
+            if (evt?.delta?.content && Array.isArray(evt.delta.content)) {
+              for (const c of evt.delta.content) {
+                if (c?.type === "text" && c?.text?.value) parts.push(c.text.value);
+              }
+            }
+            if (evt?.message?.content && Array.isArray(evt.message.content)) {
+              for (const c of evt.message.content) {
+                if (c?.type === "text" && c?.text?.value) parts.push(c.text.value);
+              }
+            }
+            if (parts.length) onChunk(parts.join(""));
+          }catch(_){}
+        }
+      }
+    }
+
+    async function handleSend(){
+      if (sending) return;
+      const msg = ($txt.value||"").trim();
+      if (!msg) return;
+
+      sending = true;
+      $send.disabled = true; $txt.disabled = true;
+
+      addUser(msg);
+      $txt.value = "";
+      await ensureThread();
+
+      const node = addBotSkeleton();
+      let acc = "";
+
+      try{
+        setStatus("yazıyor…","wait");
+        await sendMessageStream(threadId, msg, (chunk)=>{
+          acc += chunk;
+          node.bubble.textContent = acc;
+          scrollEnd();
+        });
+        finishBot(node);
+        setStatus("hazır","ok");
+      }catch(e){
+        // fallback (non-stream)
+        try{
+          setStatus("cevap alınıyor…","wait");
+          const r = await fetch(API_BASE + "/api/chat/message", {
+            method:"POST",
+            headers:{ "Content-Type":"application/json" },
+            body: JSON.stringify({ threadId, message: msg })
+          });
+          const j = await r.json();
+          node.bubble.textContent = j.message || "(Yanıt alınamadı)";
+          finishBot(node);
+          setStatus("hazır","ok");
+        }catch(err){
+          node.bubble.textContent = "Üzgünüm, bir şeyler ters gitti. Lütfen tekrar dener misiniz? 🙏";
+          node.meta.textContent   = "Hata";
+          setStatus("hata","err");
+          setTimeout(()=> setStatus("hazır","ok"), 1500);
+        }
+      }finally{
+        sending = false;
+        $send.disabled = false; $txt.disabled = false; $txt.focus();
+        scrollEnd();
+      }
+    }
+
+    // events
+    $send.addEventListener("click", handleSend);
+    $txt.addEventListener("keydown", (e)=>{
+      if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); handleSend(); }
+    });
+
+    // ilk açılışta thread başlatma istersen:
+    // ensureThread().catch(()=>{});
+  })();
+  </script>
+</body>
+</html>
