@@ -309,21 +309,29 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
 app.post("/api/chat/init", chatLimiter, async (req, res) => {
   try {
     const brandKey = (req.body && req.body.brandKey) || (req.query && req.query.brandKey);
-    if (!brandKey) return res.status(400).json({ error: "missing_brand", detail: "brandKey is required" });
 
-    const brandCfg = getBrandConfig(brandKey);
-    if (!brandCfg) return res.status(403).json({ error: "unknown_brand", detail: "brandKey not allowed" });
+    // brandKey varsa whitelist’ten kontrol et, yoksa da sorun yapma (opsiyonel)
+    let brandCfg = null;
+    if (brandKey) {
+      brandCfg = getBrandConfig(brandKey);
+      if (!brandCfg) {
+        return res.status(403).json({ error: "unknown_brand", detail: "brandKey not allowed" });
+      }
+    }
 
-    // (İsteyenler thread metadata'ya brandKey yazabilir;
-    // Assistants API threads metadata desteği varsa ileride kullanırız.)
+    // Thread oluştur (brandKey varsa metadata’ya yazalım)
+    const thread = await openAI("/threads", {
+      method: "POST",
+      body: brandKey ? { metadata: { brandKey } } : {}
+    });
 
-    const thread = await openAI("/threads", { method: "POST", body: {} });
-    return res.json({ threadId: thread.id, brandKey });
+    return res.json({ threadId: thread.id, brandKey: brandKey || null });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "init_failed", detail: String(e) });
   }
 });
+
 
 
 // 2) Mesaj gönder + run başlat + poll + yanıtı getir  (brandKey destekli)
