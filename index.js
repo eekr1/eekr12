@@ -26,8 +26,10 @@ function escapeHtml(s = "") {
   return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
-async function sendHandoffEmail({ kind, payload }) {
-  const subject = kind === "reservation" ? "Yeni Rezervasyon" : "Yeni Sipariş";
+async function sendHandoffEmail({ kind, payload, brandCfg }) {
+  const subjectBase = kind === "reservation" ? "Yeni Rezervasyon" : "Yeni Sipariş";
+  const prefix      = brandCfg?.subject_prefix ? brandCfg.subject_prefix + " " : "";
+  const subject     = `${prefix}${subjectBase}`;
 
   const html = `
     <h3>${subject}</h3>
@@ -36,9 +38,9 @@ async function sendHandoffEmail({ kind, payload }) {
   `;
 
   const info = await transporter.sendMail({
-    from: process.env.EMAIL_FROM || process.env.EMAIL_USER,
-    to: process.env.EMAIL_TO,
-    subject: `[${subject}] ${payload?.full_name || ""}`,
+    from: brandCfg?.email_from || process.env.EMAIL_FROM || process.env.EMAIL_USER,
+    to:   brandCfg?.email_to   || process.env.EMAIL_TO,
+    subject: `${subject} ${payload?.full_name || ""}`,
     html,
     text: `${subject}\n\n${JSON.stringify(payload, null, 2)}`
   });
@@ -51,6 +53,7 @@ async function sendHandoffEmail({ kind, payload }) {
 
   return info;
 }
+
 
 /* ==================== App Middleware ==================== */
 app.set("trust proxy", 1);
@@ -81,6 +84,22 @@ if (!OPENAI_API_KEY || !ASSISTANT_ID) {
   console.error("Missing OPENAI_API_KEY or ASSISTANT_ID in .env");
   process.exit(1);
 }
+
+// === Brand map (ENV'den) ===
+let BRANDS = {};
+try {
+  BRANDS = JSON.parse(process.env.BRANDS_JSON || "{}");
+} catch (e) {
+  console.warn("[brand] BRANDS_JSON parse edilemedi:", e?.message || e);
+}
+
+// Bilinmeyen key'i reddet (whitelist)
+function getBrandConfig(brandKey) {
+  if (!brandKey) return null;
+  const cfg = BRANDS[brandKey];
+  return cfg || null;
+}
+
 
 /* ==================== Helpers ==================== */
 async function openAI(path, { method = "GET", body } = {}) {
@@ -145,16 +164,22 @@ const chatLimiter = rateLimit({
   legacyHeaders: false,
 });
 
-/* ==================== STREAMING (Typing Effect) — DÜZELTİLMİŞ ==================== */
-/* Tek ve doğru yerde tanımlı SSE proxy: /threads/{threadId}/runs  + stream:true */
+/* ==================== STREAMING (Typing Effect) — brandKey destekli ==================== */
+/* OpenAI Assistants v2 SSE proxy: /threads/{threadId}/runs  +  { stream:true } */
 app.post("/api/chat/stream", chatLimiter, async (req, res) => {
   try {
-    const { threadId, message } = req.body || {};
+    const { threadId, message, brandKey } = req.body || {};
     if (!threadId || !message) {
       return res.status(400).json({ error: "missing_params", detail: "threadId and message are required" });
     }
 
-    // SSE başlıkları (proxy buffer’ları kapat)
+    // BRAND: brandKey zorunlu ve whitelist kontrolü
+    const brandCfg = getBrandConfig(brandKey);
+    if (!brandCfg) {
+      return res.status(403).json({ error: "unknown_brand", detail: "brandKey not allowed or missing" });
+    }
+
+    // SSE başlıkları
     res.writeHead(200, {
       "Content-Type": "text/event-stream; charset=utf-8",
       "Cache-Control": "no-cache, no-transform",
@@ -171,8 +196,7 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
       body: { role: "user", content: message },
     });
 
-    // 2) Run'ı STREAM modda başlat (DOĞRU YÖNTEM)
-    //    /threads/{threadId}/runs  +  body: { assistant_id, stream:true }
+    // 2) Run'ı STREAM modda başlat (assistant_id: brand öncelikli, yoksa global fallback)
     const upstream = await fetch(`${OPENAI_BASE}/threads/${threadId}/runs`, {
       method: "POST",
       headers: {
@@ -181,7 +205,7 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
         "OpenAI-Beta": "assistants=v2",
         "Accept": "text/event-stream",
       },
-      body: JSON.stringify({ assistant_id: ASSISTANT_ID, stream: true }),
+      body: JSON.stringify({ assistant_id: brandCfg.assistant_id || ASSISTANT_ID, stream: true }),
     });
 
     if (!upstream.ok || !upstream.body) {
@@ -193,22 +217,23 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
     let buffer = "";
     let accText = "";
     const decoder = new TextDecoder();
+    const reader  = upstream.body.getReader();
 
-    // 3) OpenAI’den gelen SSE’yi olduğu gibi forward et + text’i parçalar halinde topla
-    const reader = upstream.body.getReader();
+    // 3) OpenAI’den gelen SSE’yi birebir forward et + text parçalarını topla
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
+      if (clientClosed) break;
 
-      // chunk'ı müşteriye aktar (typing effect)
+      // Typing effect için chunk'ı aynen client'a aktar
       res.write(value);
 
-      // aynı anda parse etmeye çalış (handoff için)
+      // Aynı anda handoff için text’i topla
       const piece = decoder.decode(value, { stream: true });
       buffer += piece;
 
       const lines = buffer.split("\n");
-      buffer = lines.pop() || "";
+      buffer = lines.pop() || ""; // incomplete satır
 
       for (const line of lines) {
         const trimmed = line.trim();
@@ -218,6 +243,7 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
 
         try {
           const evt = JSON.parse(dataStr);
+
           // delta parçaları
           if (evt?.delta?.content && Array.isArray(evt.delta.content)) {
             for (const c of evt.delta.content) {
@@ -230,23 +256,22 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
               if (c?.type === "text" && c?.text?.value) accText += c.text.value;
             }
           }
-        } catch (_) {}
+        } catch (_) { /* parse edilemeyen satırları atla */ }
       }
-
-      if (clientClosed) break;
     }
 
-    // 4) Stream bitti → handoff varsa maille
+    // 4) Stream bitti → handoff varsa maille (brandCfg ile)
     try {
       const handoff = extractHandoff(accText);
       if (handoff) {
-        await sendHandoffEmail(handoff);
-        console.log(`[handoff][stream] emailed: ${handoff.kind}`);
+        await sendHandoffEmail({ ...handoff, brandCfg });
+        console.log(`[handoff][stream] emailed: ${handoff.kind} (${brandKey})`);
       }
     } catch (e) {
       console.error("[handoff][stream] email failed:", e);
     }
 
+    // Bitiş işareti
     try { res.write("data: [DONE]\n\n"); res.end(); } catch {}
   } catch (e) {
     console.error("stream_failed:", e);
@@ -261,19 +286,35 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
 // 1) Thread oluştur
 app.post("/api/chat/init", chatLimiter, async (req, res) => {
   try {
+    const brandKey = (req.body && req.body.brandKey) || (req.query && req.query.brandKey);
+    if (!brandKey) return res.status(400).json({ error: "missing_brand", detail: "brandKey is required" });
+
+    const brandCfg = getBrandConfig(brandKey);
+    if (!brandCfg) return res.status(403).json({ error: "unknown_brand", detail: "brandKey not allowed" });
+
+    // (İsteyenler thread metadata'ya brandKey yazabilir;
+    // Assistants API threads metadata desteği varsa ileride kullanırız.)
+
     const thread = await openAI("/threads", { method: "POST", body: {} });
-    return res.json({ threadId: thread.id });
+    return res.json({ threadId: thread.id, brandKey });
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "init_failed", detail: String(e) });
   }
 });
 
-// 2) Mesaj gönder + run başlat + poll + yanıtı getir (non-stream)
+
+// 2) Mesaj gönder + run başlat + poll + yanıtı getir  (brandKey destekli)
 app.post("/api/chat/message", chatLimiter, async (req, res) => {
-  const { threadId, message } = req.body || {};
+  const { threadId, message, brandKey } = req.body || {};
   if (!threadId || !message) {
     return res.status(400).json({ error: "missing_params", detail: "threadId and message are required" });
+  }
+
+  // BRAND: brandKey zorunlu ve whitelist kontrolü
+  const brandCfg = getBrandConfig(brandKey);
+  if (!brandCfg) {
+    return res.status(403).json({ error: "unknown_brand", detail: "brandKey not allowed or missing" });
   }
 
   try {
@@ -283,10 +324,10 @@ app.post("/api/chat/message", chatLimiter, async (req, res) => {
       body: { role: "user", content: message },
     });
 
-    // 2.b) Run oluştur
+    // 2.b) Run oluştur  (assistant_id: brand öncelikli, yoksa global fallback)
     const run = await openAI(`/threads/${threadId}/runs`, {
       method: "POST",
-      body: { assistant_id: ASSISTANT_ID },
+      body: { assistant_id: brandCfg.assistant_id || ASSISTANT_ID },
     });
 
     // 2.c) Run tamamlanana kadar bekle (poll)
@@ -311,9 +352,9 @@ app.post("/api/chat/message", chatLimiter, async (req, res) => {
     const msgs = await openAI(`/threads/${threadId}/messages?order=desc&limit=10`);
     const assistantMsg = (msgs.data || []).find(m => m.role === "assistant");
 
-    // İçerik metnini ayıkla
+    // İçerik metnini ayıkla (text parçaları)
     let text = "";
-    if (assistantMsg?.content) {
+    if (assistantMsg && assistantMsg.content) {
       for (const part of assistantMsg.content) {
         if (part.type === "text" && part.text?.value) {
           text += part.text.value + "\n";
@@ -322,24 +363,26 @@ app.post("/api/chat/message", chatLimiter, async (req, res) => {
       text = text.trim();
     }
 
-    // --- Handoff JSON çıkar + e-posta ile gönder ---
+    // --- Handoff JSON çıkar + e-posta ile gönder (brandConfig ile) ---
     const handoff = extractHandoff(text);
     if (handoff) {
       try {
-        await sendHandoffEmail(handoff);
-        console.log(`[handoff] emailed: ${handoff.kind}`);
+        await sendHandoffEmail({ ...handoff, brandCfg });
+        console.log(`[handoff] emailed: ${handoff.kind} (${brandKey})`);
       } catch (e) {
         console.error("handoff email failed:", e);
       }
       // JSON'u kullanıcıya göstermemek için metinden çıkar
-      if (handoff?.raw) text = text.replace(handoff.raw, "").trim();
+      if (handoff.raw) {
+        text = text.replace(handoff.raw, "").trim();
+      }
     }
 
     return res.json({
       status: "ok",
       threadId,
       message: text || "(Yanıt metni bulunamadı)",
-      handoff: handoff ? { kind: handoff.kind } : null,
+      handoff: handoff ? { kind: handoff.kind } : null, // UI isterse görsün
       raw: assistantMsg || null,
     });
   } catch (e) {
@@ -347,6 +390,7 @@ app.post("/api/chat/message", chatLimiter, async (req, res) => {
     return res.status(500).json({ error: "message_failed", detail: String(e) });
   }
 });
+
 
 /* ==================== Mail Isolated Test Endpoint (opsiyonel) ==================== */
 app.post("/_mail_test", async (_req, res) => {
