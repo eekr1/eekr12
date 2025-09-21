@@ -275,11 +275,12 @@
     function escape(s=""){
       return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
     }
+const BRAND_KEY = "barbare";   // yukarıda sabit tanımlıyorsun
 
     async function ensureThread(){
       if (threadId) return threadId;
       setStatus("başlatılıyor…","wait");
-      const r = await fetch(API_BASE + "/api/chat/init", { method:"POST", brandKey: "barbare" });
+      const r = await fetch(API_BASE + "/api/chat/init", { method:"POST", brandKey: "BRAND_KEY" });
       if (!r.ok) throw new Error("init_failed");
       const j = await r.json();
       threadId = j.threadId;
@@ -292,7 +293,7 @@
       const resp = await fetch(API_BASE + "/api/chat/stream", {
         method:"POST",
         headers:{ "Content-Type":"application/json", "Accept":"text/event-stream" },
-        body: JSON.stringify({ threadId, message, brandKey: "barbare" })
+        body: JSON.stringify({ threadId, message, brandKey: "BRAND_KEY" })
       });
       if (!resp.ok || !resp.body) throw new Error("stream_response_error");
 
@@ -366,7 +367,7 @@
           const r = await fetch(API_BASE + "/api/chat/message", {
             method:"POST",
             headers:{ "Content-Type":"application/json" },
-            body: JSON.stringify({ threadId, message: msg, brandKey: "barbare" })
+            body: JSON.stringify({ threadId, message: msg, brandKey: "BRAND_KEY" })
           });
           const j = await r.json();
           node.bubble.textContent = j.message || "(Yanıt alınamadı)";
