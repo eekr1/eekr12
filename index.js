@@ -95,10 +95,6 @@ try {
 }
 console.log("[brand] keys:", Object.keys(BRANDS || {}));
 
-function getBrandConfig(brandKey) {
-  if (!brandKey) return null;
-  return BRANDS[brandKey] || null;
-}
 
 // Bilinmeyen key'i reddet (whitelist)
 function getBrandConfig(brandKey) {
