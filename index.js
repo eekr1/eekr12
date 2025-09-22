@@ -8,29 +8,6 @@ dotenv.config();
 
 const app = express();
 
-app.post("/chat", async (req, res) => {
-  const userMessage = req.body.message;
-
-  // Güncel tarihi al
-  const today = new Date().toLocaleDateString("tr-TR", {
-    day: "2-digit",
-    month: "2-digit",
-    year: "numeric"
-  });
-
-  // Botun bilmesi için sisteme ekle
-  const systemPrompt = `
-  Sen akıllı bir müşteri hizmetleri botusun.
-  Bugünün tarihi: ${today}.
-  Kullanıcı “bugün ayın kaçı?” gibi sorarsa bunu bil.
-  `;
-
-  // Burada systemPrompt + userMessage'ı OpenAI'ye göndereceksin
-  // örnek: const response = await client.chat.completions.create({...});
-
-  res.json({ reply: `(${today}) Kullanıcı dedi ki: ${userMessage}` });
-});
-
 
 /* ==================== Mail Transporter ==================== */
 const transporter = nodemailer.createTransport({
