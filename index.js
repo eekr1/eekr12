@@ -248,22 +248,53 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
       throw new Error(`OpenAI stream start failed ${upstream.status}: ${errText}`);
     }
 
-    // Handoff tespiti için metni biriktirelim
+    /    // Handoff tespiti için metni biriktirelim (KULLANICIYA GÖSTERMEYİZ)
     let buffer = "";
-    let accText = "";
+    let accTextOriginal = "";   // e-posta/parse için ORİJİNAL metin
     const decoder = new TextDecoder();
     const reader  = upstream.body.getReader();
 
-    // 3) OpenAI’den gelen SSE’yi birebir forward et + text parçalarını topla
+    // Handoff code block'u kullanıcıya akmaz
+    let inHandoffBlock = false; // ```handoff:...``` içinde miyiz?
+
+    function sanitizeDeltaText(chunk) {
+      // Kullanıcıya gidecek metin: handoff blokları gizlensin
+      let out = "";
+      let i = 0;
+      while (i < chunk.length) {
+        if (!inHandoffBlock) {
+          const start = chunk.indexOf("```handoff:", i);
+          if (start === -1) {
+            out += chunk.slice(i);
+            break;
+          }
+          // handoff başlangıcına kadar olanı yayınla
+          out += chunk.slice(i, start);
+          // handoff başladı -> yayınlamayacağız
+          inHandoffBlock = true;
+          // '```' 3 karakter; başlık ve JSON gövdesi yayınlanmayacak
+          i = start + 3;
+        } else {
+          // handoff içindeyiz -> kapanış ``` arıyoruz
+          const end = chunk.indexOf("```", i);
+          if (end === -1) {
+            // kapanış yoksa bu chunk tamamen yutulur
+            return out;
+          }
+          // kapanışı bulduk -> yayınlamadan bitir ve devam et
+          inHandoffBlock = false;
+          i = end + 3;
+        }
+      }
+      return out;
+    }
+
+    // 3) OpenAI’den gelen SSE’yi sanitize ederek client'a aktar + orijinali topla
     while (true) {
       const { done, value } = await reader.read();
       if (done) break;
       if (clientClosed) break;
 
-      // Typing effect için chunk'ı aynen client'a aktar
-      res.write(value);
-
-      // Aynı anda handoff için text’i topla
       const piece = decoder.decode(value, { stream: true });
       buffer += piece;
 
@@ -279,25 +310,52 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
         try {
           const evt = JSON.parse(dataStr);
 
-          // delta parçaları
+          // 1) ORİJİNAL metni topla (mail/parse için)
           if (evt?.delta?.content && Array.isArray(evt.delta.content)) {
             for (const c of evt.delta.content) {
-              if (c?.type === "text" && c?.text?.value) accText += c.text.value;
+              if (c?.type === "text" && c?.text?.value) {
+                accTextOriginal += c.text.value;
+              }
             }
           }
-          // tamamlanmış bloklar
           if (evt?.message?.content && Array.isArray(evt.message.content)) {
             for (const c of evt.message.content) {
-              if (c?.type === "text" && c?.text?.value) accText += c.text.value;
+              if (c?.type === "text" && c?.text?.value) {
+                accTextOriginal += c.text.value;
+              }
             }
           }
-        } catch (_) { /* parse edilemeyen satırları atla */ }
+
+          // 2) KULLANICIYA GİDECEK EVENT'i sanitize et (handoff bloklarını gizle)
+          const evtOut = JSON.parse(JSON.stringify(evt)); // shallow clone
+
+          const sanitizeContentArray = (arr) => {
+            for (const c of arr) {
+              if (c?.type === "text" && c?.text?.value) {
+                c.text.value = sanitizeDeltaText(c.text.value);
+              }
+            }
+          };
+
+          if (evtOut?.delta?.content && Array.isArray(evtOut.delta.content)) {
+            sanitizeContentArray(evtOut.delta.content);
+          }
+          if (evtOut?.message?.content && Array.isArray(evtOut.message.content)) {
+            sanitizeContentArray(evtOut.message.content);
+          }
+
+          // 3) Sanitized event'i client'a yaz
+          res.write(`data: ${JSON.stringify(evtOut)}\n\n`);
+        } catch {
+          // parse edilemeyen satırları olduğu gibi geçmek istersen:
+          // res.write(`data: ${dataStr}\n\n`);
+        }
       }
     }
 
     // 4) Stream bitti → handoff varsa maille (brandCfg ile)
     try {
-      const handoff = extractHandoff(accText);
+      const handoff = extractHandoff(accTextOriginal);
       if (handoff) {
         await sendHandoffEmail({ ...handoff, brandCfg });
         console.log(`[handoff][stream] emailed: ${handoff.kind} (${brandKey})`);
@@ -308,14 +366,7 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
 
     // Bitiş işareti
     try { res.write("data: [DONE]\n\n"); res.end(); } catch {}
-  } catch (e) {
-    console.error("stream_failed:", e);
-    try {
-      res.write(`event: error\ndata: ${JSON.stringify({ error: String(e) })}\n\n`);
-      res.end();
-    } catch {}
-  }
-});
+
 
 /* ==================== Routes ==================== */
 // 1) Thread oluştur
