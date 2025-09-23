@@ -208,16 +208,27 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
       return res.status(403).json({ error: "unknown_brand", detail: "brandKey not allowed or missing" });
     }
 
+    
     // SSE başlıkları
-    res.writeHead(200, {
-      "Content-Type": "text/event-stream; charset=utf-8",
-      "Cache-Control": "no-cache, no-transform",
-      "Connection": "keep-alive",
-      "X-Accel-Buffering": "no",
-    });
+res.writeHead(200, {
+  "Content-Type": "text/event-stream; charset=utf-8",
+  "Cache-Control": "no-cache, no-transform",
+  "Connection": "keep-alive",
+  "X-Accel-Buffering": "no",
+});
 
-    let clientClosed = false;
-    req.on("close", () => { clientClosed = true; try { res.end(); } catch {} });
+// 🔸 Düzenli nabız gönder (yorum satırı SSE: client'a görünmez)
+const KA_MS = 20_000; // 20 sn: 15–30 arası güvenli
+const keepAlive = setInterval(() => {
+  try { res.write(`: keep-alive ${Date.now()}\n\n`); } catch {}
+}, KA_MS);
+
+let clientClosed = false;
+req.on("close", () => {
+  clientClosed = true;
+  try { clearInterval(keepAlive); } catch {}
+  try { res.end(); } catch {}
+});
 
     // 1) Kullanıcı mesajını threade ekle
     await openAI(`/threads/${threadId}/messages`, {
@@ -361,11 +372,13 @@ function sanitizeDeltaText(chunk) {
       console.error("[handoff][stream] email failed:", e);
     }
 
-    // Bitiş işareti
-    try {
-      res.write("data: [DONE]\n\n");
-      res.end();
-    } catch {}
+    //// Bitiş işareti
+try {
+  res.write("data: [DONE]\n\n");
+  clearInterval(keepAlive); // 🔸
+  res.end();
+} catch {}
+
   } catch (e) {
     // Üst seviye hata (başlıklar yazıldıktan sonra JSON dönmeyelim, SSE açık)
     try {
@@ -444,7 +457,7 @@ app.post("/api/chat/message", chatLimiter, async (req, res) => {
     let runStatus = run.status;
     const runId = run.id;
     const started = Date.now();
-    const TIMEOUT_MS = 60_000;
+    const TIMEOUT_MS = 180_000;
 
     while (runStatus !== "completed") {
       if (Date.now() - started > TIMEOUT_MS) {
@@ -537,6 +550,12 @@ app.post("/_mail_test", async (_req, res) => {
   }
 });
 
-app.listen(PORT, () => {
+const server = app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
+
+// (opsiyonel, platforma göre etkisi değişir)
+server.headersTimeout = 120_000;   // header bekleme
+server.requestTimeout = 0;          // request toplam süresini sınırsız yap (Node 18+)
+server.keepAliveTimeout = 75_000;   // TCP keep-alive
+
