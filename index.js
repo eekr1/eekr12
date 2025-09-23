@@ -252,40 +252,39 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
     const decoder = new TextDecoder();
     const reader  = upstream.body.getReader();
 
-    // Handoff code block'u kullanıcıya akmaz
-    let inHandoffBlock = false; // ```handoff:...``` içinde miyiz?
+    // Tüm üçlü backtick bloklarını (``` … ```) gizlemek için stateful sanitizer
+let inFencedBlock = false; // herhangi bir ``` … ``` bloğunun içindeyiz
 
-    function sanitizeDeltaText(chunk) {
-      // Kullanıcıya gidecek metin: handoff blokları gizlensin
-      let out = "";
-      let i = 0;
-      while (i < chunk.length) {
-        if (!inHandoffBlock) {
-          const start = chunk.indexOf("```handoff:", i);
-          if (start === -1) {
-            out += chunk.slice(i);
-            break;
-          }
-          // handoff başlangıcına kadar olanı yayınla
-          out += chunk.slice(i, start);
-          // handoff başladı -> yayınlamayacağız
-          inHandoffBlock = true;
-          // '```' 3 karakter; başlık ve JSON gövdesi yayınlanmayacak
-          i = start + 3;
-        } else {
-          // handoff içindeyiz -> kapanış ``` arıyoruz
-          const end = chunk.indexOf("```", i);
-          if (end === -1) {
-            // kapanış yoksa bu chunk tamamen yutulur
-            return out;
-          }
-          // kapanışı bulduk -> yayınlamadan bitir ve devam et
-          inHandoffBlock = false;
-          i = end + 3;
-        }
+function sanitizeDeltaText(chunk) {
+  let out = "";
+  let i = 0;
+  while (i < chunk.length) {
+    if (!inFencedBlock) {
+      const start = chunk.indexOf("```", i);
+      if (start === -1) {
+        out += chunk.slice(i);
+        break;
       }
-      return out;
+      // fence'e kadar olan kısmı geçir
+      out += chunk.slice(i, start);
+      // fence başladı -> kullanıcıya göstermeyeceğiz
+      inFencedBlock = true;
+      i = start + 3; // ``` sonrası
+    } else {
+      // fence içindeyiz -> kapanış ``` ara
+      const end = chunk.indexOf("```", i);
+      if (end === -1) {
+        // kapanış yoksa bu chunk'ı yut
+        return out;
+      }
+      // kapanışı bulduk -> bloğu atla ve devam et
+      inFencedBlock = false;
+      i = end + 3;
     }
+  }
+  return out;
+}
+
 
     // 3) OpenAI’den gelen SSE’yi sanitize ederek client'a aktar + orijinali topla
     while (true) {
@@ -463,16 +462,21 @@ app.post("/api/chat/message", chatLimiter, async (req, res) => {
     const msgs = await openAI(`/threads/${threadId}/messages?order=desc&limit=10`);
     const assistantMsg = (msgs.data || []).find(m => m.role === "assistant");
 
-    // İçerik metnini ayıkla (text parçaları)
-    let text = "";
-    if (assistantMsg && assistantMsg.content) {
-      for (const part of assistantMsg.content) {
-        if (part.type === "text" && part.text?.value) {
-          text += part.text.value + "\n";
-        }
-      }
-      text = text.trim();
+   // İçerik metnini ayıkla (text parçaları)
+let text = "";
+if (assistantMsg && assistantMsg.content) {
+  for (const part of assistantMsg.content) {
+    if (part.type === "text" && part.text?.value) {
+      text += part.text.value + "\n";
     }
+  }
+  text = text.trim();
+}
+
+// ⬇️ Kullanıcıya asla code-fence göstermeyelim (```...```)
+const stripFenced = (s="") => s.replace(/```[\s\S]*?```/g, "").trim();
+text = stripFenced(text);
+
 
     // ⬇️⬇️⬇️ İSTEDİĞİN LOG BLOĞU: handoff yoksa ve mesajda rezerv/sipariş niyeti varsa uyarı yaz
     {
@@ -485,26 +489,28 @@ app.post("/api/chat/message", chatLimiter, async (req, res) => {
 
     // --- Handoff JSON çıkar + e-posta ile gönder (brandConfig ile) ---
     const handoff = extractHandoff(text);
-    if (handoff) {
-      try {
-        await sendHandoffEmail({ ...handoff, brandCfg });
-        console.log(`[handoff] emailed: ${handoff.kind} (${brandKey})`);
-      } catch (e) {
-        console.error("handoff email failed:", e);
-      }
-      // JSON'u kullanıcıya göstermemek için metinden çıkar
-      if (handoff.raw) {
-        text = text.replace(handoff.raw, "").trim();
-      }
-    }
+if (handoff) {
+  try {
+    await sendHandoffEmail({ ...handoff, brandCfg });
+    console.log(`[handoff] emailed: ${handoff.kind} (${brandKey})`);
+  } catch (e) {
+    console.error("handoff email failed:", e);
+  }
+  if (handoff.raw) {
+    text = text.replace(handoff.raw, "").trim();
+  }
+}
+// Son kez garanti temizliği
+text = text.replace(/```[\s\S]*?```/g, "").trim();
 
-    return res.json({
-      status: "ok",
-      threadId,
-      message: text || "(Yanıt metni bulunamadı)",
-      handoff: handoff ? { kind: handoff.kind } : null, // UI isterse görsün
-      raw: assistantMsg || null,
-    });
+return res.json({
+  status: "ok",
+  threadId,
+  message: text || "(Yanıt metni bulunamadı)",
+  handoff: handoff ? { kind: handoff.kind } : null
+  // raw YOK — front-end sadece 'message'ı render etsin
+});
+
   } catch (e) {
     console.error(e);
     return res.status(500).json({ error: "message_failed", detail: String(e) });
