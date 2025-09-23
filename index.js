@@ -237,18 +237,16 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
       body: JSON.stringify({
         assistant_id: brandCfg.assistant_id || ASSISTANT_ID,
         stream: true,
-         
-        metadata: { brandKey }                                   // ✅ izleme
+        metadata: { brandKey } // izleme
       }),
     });
-
 
     if (!upstream.ok || !upstream.body) {
       const errText = await upstream.text().catch(() => "");
       throw new Error(`OpenAI stream start failed ${upstream.status}: ${errText}`);
     }
 
-       // Handoff tespiti için metni biriktirelim (KULLANICIYA GÖSTERMEYİZ)
+    // Handoff tespiti için metni biriktirelim (KULLANICIYA GÖSTERMEYİZ)
     let buffer = "";
     let accTextOriginal = "";   // e-posta/parse için ORİJİNAL metin
     const decoder = new TextDecoder();
@@ -347,7 +345,7 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
           // 3) Sanitized event'i client'a yaz
           res.write(`data: ${JSON.stringify(evtOut)}\n\n`);
         } catch {
-          // parse edilemeyen satırları olduğu gibi geçmek istersen:
+          // parse edilemeyen satırları olduğu gibi geçirmek istersen:
           // res.write(`data: ${dataStr}\n\n`);
         }
       }
@@ -365,8 +363,21 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
     }
 
     // Bitiş işareti
-    try { res.write("data: [DONE]\n\n"); res.end(); } catch {}
-;
+    try {
+      res.write("data: [DONE]\n\n");
+      res.end();
+    } catch {}
+  } catch (e) {
+    // Üst seviye hata (başlıklar yazıldıktan sonra JSON dönmeyelim, SSE açık)
+    try {
+      res.write(`data: ${JSON.stringify({ error: String(e) })}\n\n`);
+      res.write("data: [DONE]\n\n");
+      res.end();
+    } catch {}
+  }
+});
+
+
 
 /* ==================== Routes ==================== */
 // 1) Thread oluştur
