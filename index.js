@@ -76,17 +76,6 @@ app.get("/health", (_req, res) => res.json({ ok: true, ts: Date.now() }));
 app.use(express.static("public"));
 app.get("/", (_req, res) => res.redirect("/test.html"));
 
-/* ==================== OpenAI Config ==================== */
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const ASSISTANT_ID   = process.env.ASSISTANT_ID;
-const OPENAI_BASE    = process.env.OPENAI_BASE || "https://api.openai.com/v1";
-const PORT           = process.env.PORT || 8787;
-
-if (!OPENAI_API_KEY || !ASSISTANT_ID) {
-  console.error("Missing OPENAI_API_KEY or ASSISTANT_ID in .env");
-  process.exit(1);
-}
-
 /* ==================== Brand Config (accept both BRAND_JSON & BRANDS_JSON) ==================== */
 let BRANDS = {};
 try {
@@ -96,6 +85,23 @@ try {
   console.warn("[brand] JSON parse error:", e?.message || e);
 }
 console.log("[brand] keys:", Object.keys(BRANDS || {}));
+
+
+/* ==================== OpenAI Config ==================== */
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const ASSISTANT_ID   = process.env.ASSISTANT_ID;
+const OPENAI_BASE    = process.env.OPENAI_BASE || "https://api.openai.com/v1";
+const PORT           = process.env.PORT || 8787;
+
+const hasAnyBrandAssistant = Object.values(BRANDS || {}).some(
+  b => b && b.assistant_id
+);
+if (!OPENAI_API_KEY || (!ASSISTANT_ID && !hasAnyBrandAssistant)) {
+  console.error("Missing OPENAI_API_KEY and no assistant_id found (global or brand).");
+  process.exit(1);
+}
+
+
 
 
 // Bilinmeyen key'i reddet (whitelist)
@@ -231,7 +237,7 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
       body: JSON.stringify({
         assistant_id: brandCfg.assistant_id || ASSISTANT_ID,
         stream: true,
-        instructions: buildRunInstructions(brandKey, brandCfg),  // ✅ brand bağlamı
+         
         metadata: { brandKey }                                   // ✅ izleme
       }),
     });
@@ -364,13 +370,12 @@ app.post("/api/chat/message", chatLimiter, async (req, res) => {
     });
 
     // 2.b) Run oluştur  (assistant_id: brand öncelikli, yoksa global fallback)
-    const run = await openAI(`/threads/${threadId}/runs`, {
-      method: "POST",
-      body: {
-        assistant_id: brandCfg.assistant_id || ASSISTANT_ID,
-        instructions: buildRunInstructions(brandKey, brandCfg),   // ✅ brand bağlamı
-        metadata: { brandKey }                                    // ✅ log/izleme için
-      },
+  const run = await openAI(`/threads/${threadId}/runs`, {
+  method: "POST",
+  body: {
+    assistant_id: brandCfg.assistant_id || ASSISTANT_ID,
+    metadata: { brandKey }
+  },
     });
 
 
