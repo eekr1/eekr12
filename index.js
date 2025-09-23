@@ -7,6 +7,7 @@ import nodemailer from "nodemailer";
 dotenv.config();
 
 const app = express();
+console.log("[boot] node version:", process.version);
 
 
 /* ==================== Mail Transporter ==================== */
