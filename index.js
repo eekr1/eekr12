@@ -220,20 +220,20 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
 
     // 2) Run'ı STREAM modda başlat (assistant_id: brand öncelikli, yoksa global fallback)
     const upstream = await fetch(`${OPENAI_BASE}/threads/${threadId}/runs`, {
-  method: "POST",
-  headers: {
-    "Authorization": `Bearer ${OPENAI_API_KEY}`,
-    "Content-Type": "application/json",
-    "OpenAI-Beta": "assistants=v2",
-    "Accept": "text/event-stream",
-  },
-  body: JSON.stringify({
-    assistant_id: brandCfg.assistant_id || ASSISTANT_ID,
-    stream: true,
-    instructions: buildRunInstructions(brandKey, brandCfg),  // ✅ brand bağlamı
-    metadata: { brandKey }                                   // ✅ izleme
-  }),
-});
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+        "OpenAI-Beta": "assistants=v2",
+        "Accept": "text/event-stream",
+      },
+      body: JSON.stringify({
+        assistant_id: brandCfg.assistant_id || ASSISTANT_ID,
+        stream: true,
+        instructions: buildRunInstructions(brandKey, brandCfg),  // ✅ brand bağlamı
+        metadata: { brandKey }                                   // ✅ izleme
+      }),
+    });
 
 
     if (!upstream.ok || !upstream.body) {
@@ -364,13 +364,13 @@ app.post("/api/chat/message", chatLimiter, async (req, res) => {
 
     // 2.b) Run oluştur  (assistant_id: brand öncelikli, yoksa global fallback)
     const run = await openAI(`/threads/${threadId}/runs`, {
-  method: "POST",
-  body: {
-    assistant_id: brandCfg.assistant_id || ASSISTANT_ID,
-    instructions: buildRunInstructions(brandKey, brandCfg),   // ✅ brand bağlamı
-    metadata: { brandKey }                                    // ✅ log/izleme için
-  },
-});
+      method: "POST",
+      body: {
+        assistant_id: brandCfg.assistant_id || ASSISTANT_ID,
+        instructions: buildRunInstructions(brandKey, brandCfg),   // ✅ brand bağlamı
+        metadata: { brandKey }                                    // ✅ log/izleme için
+      },
+    });
 
 
     // 2.c) Run tamamlanana kadar bekle (poll)
@@ -405,6 +405,15 @@ app.post("/api/chat/message", chatLimiter, async (req, res) => {
       }
       text = text.trim();
     }
+
+    // ⬇️⬇️⬇️ İSTEDİĞİN LOG BLOĞU: handoff yoksa ve mesajda rezerv/sipariş niyeti varsa uyarı yaz
+    {
+      const handoffProbe = extractHandoff(text);
+      if (!handoffProbe && /rezerv|rezervasyon|sipariş|order/i.test(message)) {
+        console.warn("[handoff] no block found; assistant text:", text.slice(0, 500));
+      }
+    }
+    // ⬆️⬆️⬆️
 
     // --- Handoff JSON çıkar + e-posta ile gönder (brandConfig ile) ---
     const handoff = extractHandoff(text);
