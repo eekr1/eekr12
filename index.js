@@ -248,7 +248,7 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
       throw new Error(`OpenAI stream start failed ${upstream.status}: ${errText}`);
     }
 
-    /    // Handoff tespiti için metni biriktirelim (KULLANICIYA GÖSTERMEYİZ)
+       // Handoff tespiti için metni biriktirelim (KULLANICIYA GÖSTERMEYİZ)
     let buffer = "";
     let accTextOriginal = "";   // e-posta/parse için ORİJİNAL metin
     const decoder = new TextDecoder();
@@ -366,7 +366,7 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
 
     // Bitiş işareti
     try { res.write("data: [DONE]\n\n"); res.end(); } catch {}
-
+;
 
 /* ==================== Routes ==================== */
 // 1) Thread oluştur
