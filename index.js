@@ -27,6 +27,11 @@ function escapeHtml(s = "") {
 }
 
 async function sendHandoffEmail({ kind, payload, brandCfg }) {
+  console.log("[handoff] sendHandoffEmail called", {
+    kind,
+    from: brandCfg?.email_from || process.env.EMAIL_FROM
+  });
+
   const subjectBase = kind === "reservation" ? "Yeni Rezervasyon" : "Yeni Sipariş";
   const prefix      = brandCfg?.subject_prefix ? brandCfg.subject_prefix + " " : "";
   const subjectFull = `${prefix}${subjectBase} ${payload?.full_name || ""}`.trim();
@@ -47,6 +52,10 @@ async function sendHandoffEmail({ kind, payload, brandCfg }) {
   const to = toStr
     ? toStr.split(",").map(e => ({ email: e.trim() })).filter(x => x.email)
     : [];
+
+  if (!senderEmail) {
+    throw new Error("EMAIL_FROM (veya brandCfg.email_from) tanımlı değil.");
+  }
   if (to.length === 0) {
     throw new Error("EMAIL_TO (veya brandCfg.email_to) tanımlı değil.");
   }
@@ -62,9 +71,36 @@ async function sendHandoffEmail({ kind, payload, brandCfg }) {
   }
 
   const resp = await brevo.sendTransacEmail(email);
-  console.log("[mail] brevo messageId:", resp?.messageId || resp?.messageIds?.[0] || null);
-  return resp; // <-- BU SATIR FONKSİYONUN İÇİNDE KALACAK
 
+  // --- BURADAN SONRA EKLENEN KISIM: messageId'yi doğru parse et + sağlam log ---
+  const data  = await readIncomingMessageJSON(resp);
+  const msgId = data?.messageId || data?.messageIds?.[0] || null;
+
+  console.log("[mail] brevo send OK — status:",
+    resp?.response?.statusCode || 201,
+    "messageId:", msgId,
+    "to:", to.map(t => t.email).join(",")
+  );
+
+  return { ok: true, messageId: msgId, data };
+
+}
+
+async function readIncomingMessageJSON(resp) {
+  // Brevo SDK bazı ortamlarda node:http IncomingMessage döndürüyor
+  // (resp.response yerine doğrudan resp de gelebilir)
+  const msg = resp?.response || resp;
+  if (!msg || typeof msg.on !== "function") return null;
+
+  const chunks = [];
+  for await (const chunk of msg) chunks.push(chunk);
+  const raw = Buffer.concat(chunks).toString("utf8");
+
+  try {
+    return JSON.parse(raw);
+  } catch {
+    return null;
+  }
 }
 
 
@@ -373,6 +409,12 @@ function sanitizeDeltaText(chunk) {
     }
 
     // 4) Stream bitti â†’ handoff varsa maille (brandCfg ile)
+    console.log("[handoff] PREP", {
+  kind,
+  to: brandCfg?.email_to || process.env.EMAIL_TO,
+  hasPayload: !!payload,
+  hasFrom: !!(brandCfg?.email_from || process.env.EMAIL_FROM)
+});
     try {
       const handoff = extractHandoff(accTextOriginal);
       if (handoff) {
@@ -382,6 +424,8 @@ function sanitizeDeltaText(chunk) {
     } catch (e) {
       console.error("[handoff][stream] email failed:", e);
     }
+    const mailResp = await sendHandoffEmail({ kind, payload, brandCfg });
+console.log("[handoff] SENT", mailResp);
 
     //// BitiÅŸ iÅŸareti
 try {
@@ -514,6 +558,12 @@ text = stripFenced(text);
     // --- Handoff JSON Ã§Ä±kar + e-posta ile gÃ¶nder (brandConfig ile) ---
     const handoff = extractHandoff(text);
 if (handoff) {
+console.log("[handoff] PREP", {
+  kind,
+  to: brandCfg?.email_to || process.env.EMAIL_TO,
+  hasPayload: !!payload,
+  hasFrom: !!(brandCfg?.email_from || process.env.EMAIL_FROM)
+});
   try {
     await sendHandoffEmail({ ...handoff, brandCfg });
     console.log(`[handoff] emailed: ${handoff.kind} (${brandKey})`);
@@ -524,6 +574,8 @@ if (handoff) {
     text = text.replace(handoff.raw, "").trim();
   }
 }
+const mailResp = await sendHandoffEmail({ kind, payload, brandCfg });
+console.log("[handoff] SENT", mailResp);
 // Son kez garanti temizliÄŸi
 text = text.replace(/```[\s\S]*?```/g, "").trim();
 
@@ -543,27 +595,51 @@ return res.json({
 
 
 /* ==================== Mail Isolated Test Endpoint (opsiyonel) ==================== */
-app.post("/_mail_test", async (_req, res) => {
+app.post("/_mail_test", async (req, res) => {
   try {
-    const info = await sendHandoffEmail({
-      kind: "order",
-      payload: { full_name: "Mail Test", items: [{ sku_or_name: "Test", qty: 1 }] }
-    });
-    res.json({
-      ok: true,
-      messageId: info?.messageId,
-      accepted: info?.accepted,
-      rejected: info?.rejected,
-      response: info?.response
-    });
+    const apiKey = process.env.BREVO_API_KEY || "";
+    if (!apiKey) throw new Error("BREVO_API_KEY missing");
+
+    const senderEmail = process.env.EMAIL_FROM || "";
+    const senderName  = process.env.EMAIL_FROM_NAME || "Assistant";
+    const toStr       = (req.body?.to || process.env.EMAIL_TO || "").trim();
+
+    if (!senderEmail) throw new Error("EMAIL_FROM missing");
+    if (!toStr)       throw new Error("EMAIL_TO missing (or body.to not provided)");
+
+    const to = toStr
+      .split(",")
+      .map(e => ({ email: e.trim() }))
+      .filter(x => x.email);
+
+    const email = new SendSmtpEmail();
+    email.sender      = { email: senderEmail, name: senderName };
+    email.to          = to;
+    email.subject     = `Brevo HTTP API Test — ${new Date().toISOString()}`;
+    email.htmlContent = `<p>Merhaba! Bu mail Brevo HTTP API ile gönderildi.</p>`;
+    email.textContent = `Merhaba! Bu mail Brevo HTTP API ile gönderildi.`;
+
+    const resp = await brevo.sendTransacEmail(email);
+
+    // Brevo yanıt gövdesini oku ve messageId çıkar
+    const data  = await readIncomingMessageJSON(resp);
+    const msgId = data?.messageId || data?.messageIds?.[0] || null;
+
+    console.log("[mail][test] send OK — status:",
+      resp?.response?.statusCode || 201,
+      "messageId:", msgId
+    );
+
+    res.status(201).json({ ok: true, messageId: msgId, data });
   } catch (e) {
-    res.status(500).json({ ok: false, error: String(e) });
+    const status = e?.response?.status || 400;
+    const body   = e?.response?.data || { message: e?.message || "unknown error" };
+
+    console.error("[mail][test] error:", status, body);
+    res.status(status).json({ ok: false, error: body });
   }
 });
 
-const server = app.listen(PORT, () => {
-  console.log(`Server running on http://localhost:${PORT}`);
-});
 
 // (opsiyonel, platforma gÃ¶re etkisi deÄŸiÅŸir)
 server.headersTimeout = 120_000;   // header bekleme
