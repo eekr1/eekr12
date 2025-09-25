@@ -558,11 +558,8 @@ text = stripFenced(text);
     // --- Handoff JSON Ã§Ä±kar + e-posta ile gÃ¶nder (brandConfig ile) ---
     const handoff = extractHandoff(text);
 if (handoff) {
-console.log("[handoff] PREP", {
-  kind,
-  to: brandCfg?.email_to || process.env.EMAIL_TO,
-  hasPayload: !!payload,
-  hasFrom: !!(brandCfg?.email_from || process.env.EMAIL_FROM)
+const server = app.listen(PORT, () => {
+  console.log(`[boot] listening on http://localhost:${PORT}`);
 });
   try {
     await sendHandoffEmail({ ...handoff, brandCfg });
@@ -640,6 +637,9 @@ app.post("/_mail_test", async (req, res) => {
   }
 });
 
+const server = app.listen(PORT, () => {
+  console.log(`Server running on http://localhost:${PORT}`);
+});
 
 // (opsiyonel, platforma gÃ¶re etkisi deÄŸiÅŸir)
 server.headersTimeout = 120_000;   // header bekleme
