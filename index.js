@@ -417,13 +417,16 @@ function sanitizeDeltaText(chunk) {
 });
     try {
       const handoff = extractHandoff(accTextOriginal);
-      if (handoff) {
-        await sendHandoffEmail({ ...handoff, brandCfg });
-        console.log(`[handoff][stream] emailed: ${handoff.kind} (${brandKey})`);
-      }
-    } catch (e) {
-      console.error("[handoff][stream] email failed:", e);
-    }
+  if (handoff) {
+    const mailResp = await sendHandoffEmail({ ...handoff, brandCfg });
+    console.log("[handoff][stream] SENT", mailResp);
+  } else {
+    // İstersen sadece bilgi amaçlı bir log:
+    // console.warn("[handoff][stream] no handoff block found");
+  }
+} catch (e) {
+  console.error("[handoff][stream] email failed:", e);
+}
     const mailResp = await sendHandoffEmail({ kind, payload, brandCfg });
 console.log("[handoff] SENT", mailResp);
 
@@ -555,34 +558,37 @@ text = stripFenced(text);
     }
     // â¬†ï¸â¬†ï¸â¬†ï¸
 
-    // --- Handoff JSON Ã§Ä±kar + e-posta ile gÃ¶nder (brandConfig ile) ---
-    const handoff = extractHandoff(text);
+   // --- Handoff JSON çıkar + e-posta ile gönder (brandConfig ile) ---
+const handoff = extractHandoff(text);
+
+// Handoff yoksa ve kullanıcı mesajında sipariş/rezervasyon niyeti seziliyorsa uyarı logu bırak
+if (!handoff && /rezerv|rezervasyon|sipariş|order/i.test(message)) {
+  console.warn("[handoff] no block found; assistant text:", text.slice(0, 500));
+}
+
 if (handoff) {
-const server = app.listen(PORT, () => {
-  console.log(`[boot] listening on http://localhost:${PORT}`);
-});
   try {
-    await sendHandoffEmail({ ...handoff, brandCfg });
+    const mailResp = await sendHandoffEmail({ ...handoff, brandCfg });
     console.log(`[handoff] emailed: ${handoff.kind} (${brandKey})`);
   } catch (e) {
     console.error("handoff email failed:", e);
   }
+  // Kullanıcıya giden yanıttan ham bloğu (```...```) temizle
   if (handoff.raw) {
     text = text.replace(handoff.raw, "").trim();
   }
 }
-const mailResp = await sendHandoffEmail({ kind, payload, brandCfg });
-console.log("[handoff] SENT", mailResp);
-// Son kez garanti temizliÄŸi
+
+// Son kez garanti temizliği: tüm code-fence bloklarını sil
 text = text.replace(/```[\s\S]*?```/g, "").trim();
 
 return res.json({
   status: "ok",
   threadId,
-  message: text || "(YanÄ±t metni bulunamadÄ±)",
+  message: text || "(Yanıt metni bulunamadı)",
   handoff: handoff ? { kind: handoff.kind } : null
-  // raw YOK â€” front-end sadece 'message'Ä± render etsin
 });
+
 
   } catch (e) {
     console.error(e);
