@@ -12,13 +12,13 @@ console.log("[boot] node version:", process.version);
 
 /* ==================== Mail Client (Brevo HTTP API) ==================== */
 const brevo = new TransactionalEmailsApi();
-if (!process.env.BREVO_API_KEY) {
+ const apiKey = process.env.BREVO_API_KEY || "";
+ if (!apiKey) {
   console.warn("[mail] Missing BREVO_API_KEY — set it in environment!");
 }
-brevo.setApiKey(
-  TransactionalEmailsApi.ApiKeys.apiKey,
-  process.env.BREVO_API_KEY || ""
-);
+// SDK’nin resmi dokümantasyonundaki doğru yöntem:
+// emailAPI.authentications.apiKey.apiKey = "xkeysib-...."
+(brevo).authentications.apiKey.apiKey = apiKey;
 console.log("[mail] Brevo HTTP API client ready");
 
 
