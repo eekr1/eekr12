@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
-import nodemailer from "nodemailer";
+import { TransactionalEmailsApi, SendSmtpEmail } from "@getbrevo/brevo";
 
 dotenv.config();
 
@@ -10,51 +10,59 @@ const app = express();
 console.log("[boot] node version:", process.version);
 
 
-/* ==================== Mail Transporter ==================== */
-const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST,
-  port: Number(process.env.EMAIL_PORT || 587),
-  secure: false, // 587 -> STARTTLS
-  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
-});
-
-// (Opsiyonel) Boot sırasında SMTP doğrulaması (log için)
-transporter.verify().then(
-  () => console.log("[mail] SMTP ready"),
-  (err) => console.warn("[mail] SMTP verify failed:", err?.message || err)
+/* ==================== Mail Client (Brevo HTTP API) ==================== */
+const brevo = new TransactionalEmailsApi();
+if (!process.env.BREVO_API_KEY) {
+  console.warn("[mail] Missing BREVO_API_KEY — set it in environment!");
+}
+brevo.setApiKey(
+  TransactionalEmailsApi.ApiKeys.apiKey,
+  process.env.BREVO_API_KEY || ""
 );
+console.log("[mail] Brevo HTTP API client ready");
 
 function escapeHtml(s = "") {
   return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
 }
 
-async function sendHandoffEmail({ kind, payload, brandCfg }) {
-  const subjectBase = kind === "reservation" ? "Yeni Rezervasyon" : "Yeni Sipariş";
-  const prefix      = brandCfg?.subject_prefix ? brandCfg.subject_prefix + " " : "";
-  const subject     = `${prefix}${subjectBase}`;
+const subjectBase = kind === "reservation" ? "Yeni Rezervasyon" : "Yeni Sipariş";
+ const prefix      = brandCfg?.subject_prefix ? brandCfg.subject_prefix + " " : "";
+ const subjectFull = `${prefix}${subjectBase} ${payload?.full_name || ""}`.trim();
 
-  const html = `
-    <h3>${subject}</h3>
-    <pre style="font-size:14px;background:#f6f6f6;padding:12px;border-radius:8px">${escapeHtml(JSON.stringify(payload, null, 2))}</pre>
-    <p>Gönderim: ${new Date().toLocaleString()}</p>
-  `;
+ const html = `
+   <h3>${subjectFull}</h3>
+   <pre style="font-size:14px;background:#f6f6f6;padding:12px;border-radius:8px">${escapeHtml(JSON.stringify(payload, null, 2))}</pre>
+   <p>Gönderim: ${new Date().toLocaleString()}</p>
+ `;
+  const text = `${subjectFull}\n\n${JSON.stringify(payload, null, 2)}`;
 
-  const info = await transporter.sendMail({
-    from: brandCfg?.email_from || process.env.EMAIL_FROM || process.env.EMAIL_USER,
-    to:   brandCfg?.email_to   || process.env.EMAIL_TO,
-    subject: `${subject} ${payload?.full_name || ""}`,
-    html,
-    text: `${subject}\n\n${JSON.stringify(payload, null, 2)}`
-  });
+  // FROM (Brevo'da doğrulanmış bir gönderen olmalı)
+  const senderEmail = brandCfg?.email_from || process.env.EMAIL_FROM;
+  const senderName  = brandCfg?.email_from_name || brandCfg?.label || "Assistant";
 
-  console.log("[mail] info.messageId:", info?.messageId);
-  console.log("[mail] accepted:", info?.accepted);
-  console.log("[mail] rejected:", info?.rejected);
-  console.log("[mail] envelope:", info?.envelope);
-  console.log("[mail] response:", info?.response);
+  // TO (virgülle çoklu adres destekler)
+ const toStr = (brandCfg?.email_to || process.env.EMAIL_TO || "").trim();
+  const to = toStr
+    ? toStr.split(",").map(e => ({ email: e.trim() })).filter(x => x.email)
+   : [];
+if (to.length === 0) {
+  throw new Error("EMAIL_TO (veya brandCfg.email_to) tanımlı değil.");
+ }
 
-  return info;
-}
+ const email = new SendSmtpEmail();
+ email.sender      = { email: senderEmail, name: senderName };
+ email.to          = to;
+ email.subject     = subjectFull;
+ email.htmlContent = html;
+ email.textContent = text;
+ if (brandCfg?.email_reply_to) {
+    email.replyTo = { email: brandCfg.email_reply_to };
+  }
+
+ const resp = await brevo.sendTransacEmail(email);
+ console.log("[mail] brevo messageId:", resp?.messageId || resp?.messageIds?.[0] || null);
+ return resp;
+ 
 
 
 /* ==================== App Middleware ==================== */
