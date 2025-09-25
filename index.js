@@ -2,7 +2,7 @@ import express from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
-import nodemailer from "nodemailer";
+import { TransactionalEmailsApi, SendSmtpEmail } from "@getbrevo/brevo";
 
 dotenv.config();
 
@@ -10,19 +10,17 @@ const app = express();
 console.log("[boot] node version:", process.version);
 
 
-/* ==================== Mail Transporter ==================== */
-const transporter = nodemailer.createTransport({
-  host: process.env.EMAIL_HOST,
-  port: Number(process.env.EMAIL_PORT || 587),
-  secure: false, // 587 -> STARTTLS
-  auth: { user: process.env.EMAIL_USER, pass: process.env.EMAIL_PASS }
-});
-
-// (Opsiyonel) Boot sÄ±rasÄ±nda SMTP doÄŸrulamasÄ± (log iÃ§in)
-transporter.verify().then(
-  () => console.log("[mail] SMTP ready"),
-  (err) => console.warn("[mail] SMTP verify failed:", err?.message || err)
+/* ==================== Mail Client (Brevo HTTP API) ==================== */
+const brevo = new TransactionalEmailsApi();
+if (!process.env.BREVO_API_KEY) {
+  console.warn("[mail] Missing BREVO_API_KEY — set it in environment!");
+}
+brevo.setApiKey(
+  TransactionalEmailsApi.ApiKeys.apiKey,
+  process.env.BREVO_API_KEY || ""
 );
+console.log("[mail] Brevo HTTP API client ready");
+
 
 function escapeHtml(s = "") {
   return s.replace(/[&<>"]/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
