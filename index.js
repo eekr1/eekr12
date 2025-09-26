@@ -98,7 +98,7 @@ async function readIncomingMessageJSON(resp) {
 
   try {
     return JSON.parse(raw);
-  } catch {
+  } catch (e) {
     return null;
   }
 }
@@ -328,7 +328,8 @@ function sanitizeDeltaText(chunk) {
         out += chunk.slice(i);
         break;
       }
-      // fence'e kadar olan kısmı geçir      out += chunk.slice(i, start);
+      // fence'e kadar olan kısmı geçir
+      out += chunk.slice(i, start);
 
       // fence başladı -> kullanıcıya göstermeyeceğiz
       inFencedBlock = true;
@@ -347,7 +348,6 @@ function sanitizeDeltaText(chunk) {
   }
   return out;
 }
-
 
 
 
@@ -428,30 +428,43 @@ while (true) {
 
       // 3) Sanitized event'i client'a yaz
       res.write(`data: ${JSON.stringify(evtOut)}\n\n`);
-    } catch {
+    } catch (err) {
       // parse edilemeyen satırları olduğu gibi geçirmek istersen:
       // res.write(`data: ${dataStr}\n\n`);
+      console.warn("[stream][parse] non-JSON line forwarded or skipped:", err?.message);
     }
   }
 }
 
 // 4) Stream bitti → handoff varsa maille (brandCfg ile)
 try {
-  // Bu log, stream sonu tetikleme hazırlığını açıkça gösterir
+  // Güvenli varsayılanlar (kind/payload üst scope’ta yoksa)
+  const defaultKind = "order"; // gerekirse "reservation" yap
+  const defaultPayload = { full_name: "Stream Handoff", items: [] };
+
   console.log("[handoff] PREP(stream-end)", {
     sawHandoffSignal,
-    kind,
     to: brandCfg?.email_to || process.env.EMAIL_TO,
-    hasPayload: !!payload,
-    hasFrom: !!(brandCfg?.email_from || process.env.EMAIL_FROM)
+    from: brandCfg?.email_from || process.env.EMAIL_FROM,
   });
 
   // Metinden handoff objesini çıkar (kind/payload vs.)
   const handoff = extractHandoff(accTextOriginal);
 
   if (handoff || sawHandoffSignal) {
-    // handoff çıktıysa onu kullan; yoksa mevcut kind/payload ile deneriz
-    const finalHandoff = handoff || { kind, payload };
+    // extractHandoff dönerse onu kullan; yoksa varsayılanlarla gönder
+    const finalHandoff = handoff || { kind: defaultKind, payload: defaultPayload };
+
+    // Göndermeden önce son kontroller
+    if (!(brandCfg?.email_to || process.env.EMAIL_TO)) {
+      throw new Error("EMAIL_TO / brandCfg.email_to tanımlı değil.");
+    }
+    if (!(brandCfg?.email_from || process.env.EMAIL_FROM)) {
+      throw new Error("EMAIL_FROM / brandCfg.email_from tanımlı değil.");
+    }
+
+    // (İsteğe bağlı) mail gönderme satırı sende zaten varsa bırak;
+    // burada bırakıyorum ki akış tamam olsun
     const mailResp = await sendHandoffEmail({ ...finalHandoff, brandCfg });
     console.log("[handoff][stream] SENT", mailResp);
   } else {
@@ -461,7 +474,7 @@ try {
   console.error("[handoff][stream] email failed:", {
     message: e?.message,
     code: e?.code,
-    stack: e?.stack
+    stack: e?.stack,
   });
 }
 
@@ -470,18 +483,18 @@ try {
   res.write("data: [DONE]\n\n");
   clearInterval(keepAlive);
   res.end();
-} catch {}
-
-  } catch (e) {
-    // Üst seviye hata (başlıklar yazıldıktan sonra JSON dönmeyelim, SSE açık)
-
-    try {
-      res.write(`data: ${JSON.stringify({ error: String(e) })}\n\n`);
-      res.write("data: [DONE]\n\n");
-      res.end();
-    } catch {}
+} catch (e) {
+  // yoksay
+}  } catch (e) {
+    console.error("[stream] fatal:", e);
+    try { res.write(`data: ${JSON.stringify({ error: "stream_failed" })}\n\n`); } catch (__) {}
+    try { res.write("data: [DONE]\n\n"); } catch (__) {}
+    try { clearInterval(keepAlive); } catch (__) {}
+    try { res.end(); } catch (__) {}
   }
-});
+}); // /api/chat/stream KAPANIŞ
+
+
 
 
 
@@ -609,8 +622,7 @@ if (!handoff && /rezerv|rezervasyon|sipariş|order/i.test(message)) {
 
 if (handoff) {
   try {
-    const mailResp = await sendHandoffEmail({ ...handoff, brandCfg });
-    console.log(`[handoff] emailed: ${handoff.kind} (${brandKey})`);
+    
   } catch (e) {
     console.error("handoff email failed:", e);
   }
