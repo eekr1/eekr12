@@ -328,30 +328,32 @@ function sanitizeDeltaText(chunk) {
         out += chunk.slice(i);
         break;
       }
-   // fence'e kadar olan kısmı geçir
-out += chunk.slice(i, start);
+      // fence'e kadar olan kısmı geçir      out += chunk.slice(i, start);
 
-// fence başladı -> kullanıcıya göstermeyeceğiz
-inFencedBlock = true;
-i = start + 3; // ``` sonrası
-} else {
-  // fence içindeyiz -> kapanış ``` ara
-  const end = chunk.indexOf("```", i);
-  if (end === -1) {
-    // kapanış yoksa bu chunk'ı yut
-    return out;
+      // fence başladı -> kullanıcıya göstermeyeceğiz
+      inFencedBlock = true;
+      i = start + 3; // ``` sonrası
+    } else {
+      // fence içindeyiz -> kapanış ``` ara
+      const end = chunk.indexOf("```", i);
+      if (end === -1) {
+        // kapanış yoksa bu chunk'ı yut
+        return out;
+      }
+      // kapanışı bulduk -> bloğu atla ve devam et
+      inFencedBlock = false;
+      i = end + 3;
+    }
   }
-  // kapanışı bulduk -> bloğu atla ve devam et
-  inFencedBlock = false;
-  i = end + 3;
-}
-}
-return out;
+  return out;
 }
 
 
 
-  // 3) OpenAI’den gelen SSE’yi sanitize ederek client'a aktar + orijinali topla
+
+// 3) OpenAI’den gelen SSE’yi sanitize ederek client'a aktar + orijinali topla
+let sawHandoffSignal = false; // delta sırasında metadata.handoff görürsek işaretle
+
 while (true) {
   const { done, value } = await reader.read();
   if (done) break;
@@ -363,89 +365,110 @@ while (true) {
   const lines = buffer.split("\n");
   buffer = lines.pop() || ""; // eksik satır
 
+  for (const line of lines) {
+    const trimmed = line.trim();
+    if (!trimmed.startsWith("data:")) continue;
+    const dataStr = trimmed.slice(5).trim();
+    if (!dataStr || dataStr === "[DONE]") continue;
 
+    try {
+      const evt = JSON.parse(dataStr);
 
-      for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed.startsWith("data:")) continue;
-        const dataStr = trimmed.slice(5).trim();
-        if (!dataStr || dataStr === "[DONE]") continue;
+      // --- STREAM HANDLER: her delta paketinde handoff sinyali var mı? ---
+      // (farklı şekiller için 3 kaynaktan da bak: choices[].delta, evt.delta, evt.message)
+      const metaDeltaA = evt?.choices?.[0]?.delta?.metadata;
+      const metaDeltaB = evt?.delta?.metadata;
+      const metaDeltaC = evt?.message?.metadata;
+      const metaDelta  = metaDeltaA ?? metaDeltaB ?? metaDeltaC;
 
-        try {
-          const evt = JSON.parse(dataStr);
-
-         // 1) ORİJİNAL metni topla (mail/parse için)
-
-          if (evt?.delta?.content && Array.isArray(evt.delta.content)) {
-            for (const c of evt.delta.content) {
-              if (c?.type === "text" && c?.text?.value) {
-                accTextOriginal += c.text.value;
-              }
-            }
-          }
-          if (evt?.message?.content && Array.isArray(evt.message.content)) {
-            for (const c of evt.message.content) {
-              if (c?.type === "text" && c?.text?.value) {
-                accTextOriginal += c.text.value;
-              }
-            }
-          }
-
-          // 2) KULLANICIYA GİDECEK EVENT'i sanitize et (handoff bloklarını gizle)
-
-          const evtOut = JSON.parse(JSON.stringify(evt)); // shallow clone
-
-          const sanitizeContentArray = (arr) => {
-            for (const c of arr) {
-              if (c?.type === "text" && c?.text?.value) {
-                c.text.value = sanitizeDeltaText(c.text.value);
-              }
-            }
-          };
-
-          if (evtOut?.delta?.content && Array.isArray(evtOut.delta.content)) {
-            sanitizeContentArray(evtOut.delta.content);
-          }
-          if (evtOut?.message?.content && Array.isArray(evtOut.message.content)) {
-            sanitizeContentArray(evtOut.message.content);
-          }
-
-          // 3) Sanitized event'i client'a yaz
-          res.write(`data: ${JSON.stringify(evtOut)}\n\n`);
-        } catch {
-        // parse edilemeyen satırları olduğu gibi geçirmek istersen:
-// res.write(`data: ${dataStr}\n\n`);
-
+      if (metaDelta !== undefined) {
+        console.log("[handoff][detect:delta]", {
+          hasMeta: true,
+          handoff: metaDelta?.handoff,
+          keys: metaDelta ? Object.keys(metaDelta) : []
+        });
+        if (metaDelta?.handoff === true) {
+          sawHandoffSignal = true;
         }
       }
-    }
 
-    // 4) Stream bitti â†’ handoff varsa maille (brandCfg ile)
-    console.log("[handoff] PREP", {
-  kind,
-  to: brandCfg?.email_to || process.env.EMAIL_TO,
-  hasPayload: !!payload,
-  hasFrom: !!(brandCfg?.email_from || process.env.EMAIL_FROM)
-});
-    try {
-      const handoff = extractHandoff(accTextOriginal);
-  if (handoff) {
-    const mailResp = await sendHandoffEmail({ ...handoff, brandCfg });
+      // 1) ORİJİNAL metni topla (mail/parse için)
+      if (evt?.delta?.content && Array.isArray(evt.delta.content)) {
+        for (const c of evt.delta.content) {
+          if (c?.type === "text" && c?.text?.value) {
+            accTextOriginal += c.text.value;
+          }
+        }
+      }
+      if (evt?.message?.content && Array.isArray(evt.message.content)) {
+        for (const c of evt.message.content) {
+          if (c?.type === "text" && c?.text?.value) {
+            accTextOriginal += c.text.value;
+          }
+        }
+      }
+
+      // 2) KULLANICIYA GİDECEK EVENT'i sanitize et (handoff bloklarını gizle)
+      const evtOut = JSON.parse(JSON.stringify(evt)); // shallow clone
+
+      const sanitizeContentArray = (arr) => {
+        for (const c of arr) {
+          if (c?.type === "text" && c?.text?.value) {
+            c.text.value = sanitizeDeltaText(c.text.value);
+          }
+        }
+      };
+
+      if (evtOut?.delta?.content && Array.isArray(evtOut.delta.content)) {
+        sanitizeContentArray(evtOut.delta.content);
+      }
+      if (evtOut?.message?.content && Array.isArray(evtOut.message.content)) {
+        sanitizeContentArray(evtOut.message.content);
+      }
+
+      // 3) Sanitized event'i client'a yaz
+      res.write(`data: ${JSON.stringify(evtOut)}\n\n`);
+    } catch {
+      // parse edilemeyen satırları olduğu gibi geçirmek istersen:
+      // res.write(`data: ${dataStr}\n\n`);
+    }
+  }
+}
+
+// 4) Stream bitti → handoff varsa maille (brandCfg ile)
+try {
+  // Bu log, stream sonu tetikleme hazırlığını açıkça gösterir
+  console.log("[handoff] PREP(stream-end)", {
+    sawHandoffSignal,
+    kind,
+    to: brandCfg?.email_to || process.env.EMAIL_TO,
+    hasPayload: !!payload,
+    hasFrom: !!(brandCfg?.email_from || process.env.EMAIL_FROM)
+  });
+
+  // Metinden handoff objesini çıkar (kind/payload vs.)
+  const handoff = extractHandoff(accTextOriginal);
+
+  if (handoff || sawHandoffSignal) {
+    // handoff çıktıysa onu kullan; yoksa mevcut kind/payload ile deneriz
+    const finalHandoff = handoff || { kind, payload };
+    const mailResp = await sendHandoffEmail({ ...finalHandoff, brandCfg });
     console.log("[handoff][stream] SENT", mailResp);
   } else {
-    // İstersen sadece bilgi amaçlı bir log:
-    // console.warn("[handoff][stream] no handoff block found");
+    console.log("[handoff][stream] no handoff block/signal found");
   }
 } catch (e) {
-  console.error("[handoff][stream] email failed:", e);
+  console.error("[handoff][stream] email failed:", {
+    message: e?.message,
+    code: e?.code,
+    stack: e?.stack
+  });
 }
-    const mailResp = await sendHandoffEmail({ kind, payload, brandCfg });
-console.log("[handoff] SENT", mailResp);
 
-    //// Bitiş İşareti
+// 5) Bitiş işareti
 try {
   res.write("data: [DONE]\n\n");
-  clearInterval(keepAlive); // ğŸ”¸
+  clearInterval(keepAlive);
   res.end();
 } catch {}
 
