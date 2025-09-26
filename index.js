@@ -192,6 +192,13 @@ async function openAI(path, { method = "GET", body } = {}) {
 // ifadeleri yakalayıp minimal bir handoff objesi döner.
 // --- Metinden handoff çıkarımı (fallback - sade & güvenli) ---
 function inferHandoffFromText(text) {
+
+  if (!text) return null;
+
+    // Explicit handoff şüphesi: fallback tetikleme
+
+  if (/```[\s\S]*"handoff"\s*:/.test(text)) return null;
+
   if (!text) return null;
 
   const isAssistantFormAsk =
@@ -234,62 +241,82 @@ function inferHandoffFromText(text) {
 
 
 
-// --- Accumulated raw text içinden handoff objesini çıkarır (esnek sürüm) ---
+// --- Accumulated raw text içinden handoff objesini çıkarır (daha esnek sürüm) ---
 // Desteklenen formatlar:
 // 1) ```handoff { ...json... }```
 // 2) ```json { "handoff": { ... } }```  -> içinden handoff alır
-// 3) <handoff> { ...json... } </handoff>
-// 4) [[HANDOFF:base64(json)]]
-// JSON parse sonrası şu şekilleri kabul eder:
+// 3) ```json { "handoff": "reservation", "payload": { ... } }```  ✅ YENİ
+// 4) ``` { "handoff": "...", "payload": { ... } } ``` (dil etiketi olmadan fenced) ✅
+// 5) <handoff> { ...json... } </handoff>
+// 6) [[HANDOFF:base64(json)]]
+// JSON parse sonrası kabul edilen şekiller:
 //   - { kind, payload, ... }
 //   - { handoff: { kind, payload, ... } }
+//   - { handoff: "<kind>", payload: { ... } }
 function extractHandoff(raw) {
   if (!raw) return null;
 
   const tryNormalize = (obj) => {
     if (!obj || typeof obj !== "object") return null;
-    const candidate = obj.handoff && typeof obj.handoff === "object" ? obj.handoff : obj;
-    if (candidate && candidate.kind && candidate.payload) return candidate;
+
+    // 1) Doğrudan { kind, payload }
+    if (obj.kind && obj.payload) return { kind: obj.kind, payload: obj.payload };
+
+    // 2) { handoff: { kind, payload } }
+    if (obj.handoff && typeof obj.handoff === "object") {
+      const h = obj.handoff;
+      if (h.kind && h.payload) return { kind: h.kind, payload: h.payload };
+    }
+
+    // 3) { handoff: "reservation", payload: {...} }  ✅
+    if (typeof obj.handoff === "string" && obj.payload && typeof obj.payload === "object") {
+      return { kind: obj.handoff, payload: obj.payload };
+    }
+
+    return null;
+  };
+
+  // Yardımcı: fenced bir bloğu parse edip normalize et
+  const parseFence = (m) => {
+    if (m && m[1]) {
+      try {
+        const obj = JSON.parse(m[1]);
+        const norm = tryNormalize(obj);
+        if (norm) return norm;
+      } catch {}
+    }
     return null;
   };
 
   // 1) ```handoff ... ```
   {
     const m = raw.match(/```handoff\s*([\s\S]*?)\s*```/i);
-    if (m && m[1]) {
-      try {
-        const obj = JSON.parse(m[1]);
-        const norm = tryNormalize(obj);
-        if (norm) return norm;
-      } catch {}
-    }
+    const norm = parseFence(m);
+    if (norm) return norm;
   }
 
-  // 1.b) ```json ...``` içinde "handoff" anahtarını ara
+  // 2) ```json ...``` içinde handoff ara
   {
     const m = raw.match(/```json\s*([\s\S]*?)\s*```/i);
-    if (m && m[1]) {
-      try {
-        const obj = JSON.parse(m[1]);
-        const norm = tryNormalize(obj);
-        if (norm) return norm;
-      } catch {}
-    }
+    const norm = parseFence(m);
+    if (norm) return norm;
   }
 
-  // 2) <handoff> ... </handoff>
+  // 3) Dil etiketi olmayan fenced: ``` { "handoff": ... } ```
+  {
+    const m = raw.match(/```\s*([\s\S]*?"handoff"\s*:[\s\S]*?)\s*```/i);
+    const norm = parseFence(m);
+    if (norm) return norm;
+  }
+
+  // 4) <handoff> ... </handoff>
   {
     const m = raw.match(/<handoff>\s*([\s\S]*?)\s*<\/handoff>/i);
-    if (m && m[1]) {
-      try {
-        const obj = JSON.parse(m[1]);
-        const norm = tryNormalize(obj);
-        if (norm) return norm;
-      } catch {}
-    }
+    const norm = parseFence(m);
+    if (norm) return norm;
   }
 
-  // 3) [[HANDOFF:...]]  (base64 json)
+  // 5) [[HANDOFF:...]]  (base64 json)
   {
     const m = raw.match(/\[\[HANDOFF:([A-Za-z0-9+/=]+)\]\]/i);
     if (m && m[1]) {
@@ -304,6 +331,8 @@ function extractHandoff(raw) {
 
   return null;
 }
+
+
 
 // ---- Resolve "to" & "from" with safe fallbacks ----
 function resolveEmailRouting(brandCfg) {
@@ -543,9 +572,13 @@ while (true) {
 
 // 4) Stream bitti → handoff varsa maille (brandCfg ile)
 console.log("[handoff][debug] accTextOriginal.len =", accTextOriginal.length,
-            "contains ```handoff?", /```handoff/i.test(accTextOriginal),
-            "contains <handoff>?", /<handoff>/i.test(accTextOriginal),
-            "contains [[HANDOFF:", /\[\[HANDOFF:/i.test(accTextOriginal));
+  "```handoff fence?", /```handoff/i.test(accTextOriginal),
+  "```json fence?", /```json/i.test(accTextOriginal),
+  "fenced handoff key?", /```[\s\S]*\"handoff\"\s*:/.test(accTextOriginal),
+  "<handoff> tag?", /<handoff>/i.test(accTextOriginal),
+  "[[HANDOFF: base64]?", /\[\[HANDOFF:/i.test(accTextOriginal)
+);
+
 
 let handoff = extractHandoff(accTextOriginal);
 
@@ -559,6 +592,7 @@ if (!handoff) {
 }
 
 const { to: toAddr, from: fromAddr } = resolveEmailRouting(brandCfg);
+
 console.log("[handoff] PREP(stream-end)", {
   sawHandoffSignal: !!handoff,
   to: toAddr,
