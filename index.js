@@ -27,64 +27,46 @@ function escapeHtml(s = "") {
 }
 
 async function sendHandoffEmail({ kind, payload, brandCfg }) {
-  console.log("[handoff] sendHandoffEmail called", {
-    kind,
-    from: brandCfg?.email_from || process.env.EMAIL_FROM
-  });
+  const { to, from } = resolveEmailRouting(brandCfg);
 
-  const subjectBase = kind === "reservation" ? "Yeni Rezervasyon" : "Yeni Sipariş";
-  const prefix      = brandCfg?.subject_prefix ? brandCfg.subject_prefix + " " : "";
-  const subjectFull = `${prefix}${subjectBase} ${payload?.full_name || ""}`.trim();
+  console.log("[handoff] sendHandoffEmail called", { kind, to, from });
 
-  const html = `
-    <h3>${subjectFull}</h3>
-    <pre style="font-size:14px;background:#f6f6f6;padding:12px;border-radius:8px">${escapeHtml(JSON.stringify(payload, null, 2))}</pre>
-    <p>Gönderim: ${new Date().toLocaleString()}</p>
-  `;
-  const text = `${subjectFull}\n\n${JSON.stringify(payload, null, 2)}`;
+  // Basit subject seçimi
+  const subject = `[${brandCfg?.brandName || "barbare"}] ${(
+    kind === "reservation" ? "Yeni Rezervasyon" :
+    kind === "order"       ? "Yeni Sipariş" :
+    kind === "customer_request" ? "Müşteri İsteği" :
+    `Handoff: ${kind || "Bilinmiyor"}`
+  )}`;
 
-  // FROM (Brevo'da doğrulanmış bir gönderen olmalı)
-  const senderEmail = brandCfg?.email_from || process.env.EMAIL_FROM;
-  const senderName  = brandCfg?.email_from_name || brandCfg?.label || "Assistant";
+  // Gövde: JSON + kısa özet
+  const textSummary = (() => {
+    const c = payload?.contact || {};
+    const name = c.name || payload?.full_name || "";
+    const phone = c.phone || payload?.phone || "";
+    const email = c.email || payload?.email || "";
+    return [
+      name && `Ad: ${name}`,
+      phone && `Tel: ${phone}`,
+      email && `E-posta: ${email}`,
+    ].filter(Boolean).join("\n");
+  })();
 
-  // TO (virgülle çoklu adres destekler)
-  const toStr = (brandCfg?.email_to || process.env.EMAIL_TO || "").trim();
-  const to = toStr
-    ? toStr.split(",").map(e => ({ email: e.trim() })).filter(x => x.email)
-    : [];
+  const mailOptions = {
+    from,           // envelope & header from
+    to,             // alıcı
+    subject,
+    // HTML istersen aynı içeriği <pre> ile de atabilirsin
+    text:
+`${textSummary ? textSummary + "\n\n" : ""}Payload:
+${JSON.stringify(payload, null, 2)}`
+  };
 
-  if (!senderEmail) {
-    throw new Error("EMAIL_FROM (veya brandCfg.email_from) tanımlı değil.");
-  }
-  if (to.length === 0) {
-    throw new Error("EMAIL_TO (veya brandCfg.email_to) tanımlı değil.");
-  }
-
-  const email = new SendSmtpEmail();
-  email.sender      = { email: senderEmail, name: senderName };
-  email.to          = to;
-  email.subject     = subjectFull;
-  email.htmlContent = html;
-  email.textContent = text;
-  if (brandCfg?.email_reply_to) {
-    email.replyTo = { email: brandCfg.email_reply_to };
-  }
-
-  const resp = await brevo.sendTransacEmail(email);
-
-  // --- BURADAN SONRA EKLENEN KISIM: messageId'yi doğru parse et + sağlam log ---
-  const data  = await readIncomingMessageJSON(resp);
-  const msgId = data?.messageId || data?.messageIds?.[0] || null;
-
-  console.log("[mail] brevo send OK — status:",
-    resp?.response?.statusCode || 201,
-    "messageId:", msgId,
-    "to:", to.map(t => t.email).join(",")
-  );
-
-  return { ok: true, messageId: msgId, data };
-
+  // Not: transporter dışarıda create edilmiş olmalı (host, port, auth vs)
+  const info = await transporter.sendMail(mailOptions);
+  console.log("[mail] brevo send OK — status:", info?.response || info?.messageId, "to:", to);
 }
+
 
 async function readIncomingMessageJSON(resp) {
   // Brevo SDK bazı ortamlarda node:http IncomingMessage döndürüyor
@@ -199,21 +181,34 @@ async function openAI(path, { method = "GET", body } = {}) {
 // --- Metinden handoff çıkarımı (fallback) ---
 // Model handoff bloğu üretmediyse, müşteri temsilcisine devri gerektiren
 // ifadeleri yakalayıp minimal bir handoff objesi döner.
+// --- Metinden handoff çıkarımı (fallback - sade & güvenli) ---
 function inferHandoffFromText(text) {
   if (!text) return null;
 
-  // Es Eskalasyon ipuçları (TR ağırlıklı örnekler):
-  const ESCALATE = /(temsilcimize ilet|kesin yanıt veremiyorum|kimlik|yaş doğrulaması|rezervasyon|sipariş(?!iniz alınmıştır)|stok (doğrula|durumu)|fatura bilgisi|iade onayı|özel durum)/i;
-  if (!ESCALATE.test(text)) return null;
+  const isAssistantFormAsk =
+    /lütfen.*(aşağıdaki|bilgileri).*paylaşır mısınız/i.test(text) ||
+    /1\.\s*ad[ıi]n[ıi]z/i.test(text) ||
+    /2\.\s*telefon/i.test(text) ||
+    /3\.\s*e-?posta/i.test(text);
 
-  // Basit çıkarımlar (varsa)
+  const isAssistantConfirm =
+    /rezervasyonunuzu.*özetleyeyim/i.test(text) ||
+    /onaylıyor musunuz/i.test(text);
+
+  // Asistanın soru/özet şablonlarında asla tetikleme
+  if (isAssistantFormAsk || isAssistantConfirm) return null;
+
+  // PII sinyali: en az bir iletişim bilgisi lazım (aksi halde tetikleme yok)
   const phoneMatch = text.match(/(\+?\d[\d\s().-]{9,}\d)/);
   const emailMatch = text.match(/[^\s@]+@[^\s@]+\.[^\s@]+/);
+
+  if (!phoneMatch && !emailMatch) return null;
+
+  // Basit çıkarımlar (varsa)
   const phone = phoneMatch ? phoneMatch[1].trim() : undefined;
   const email = emailMatch ? emailMatch[0].trim() : undefined;
 
-  // Sipariş/ad/ürün gibi olası alanlar varsa al (çok kaba çıkarım)
-  const nameMatch = text.match(/ad[ıi]\s*[:\-]\s*([^\n,]+)/i);
+  const nameMatch = text.match(/(?:ad[ıi]\s*[:\-]\s*|(?:ben|isim|adım)\s+)([^\n,]+)/i);
   const addrMatch = text.match(/adres[ıi]\s*[:\-]\s*([^\n]+)/i);
   const orderMatch = text.match(/sipariş\s*[:\-]\s*([^\n]+)/i);
 
@@ -227,6 +222,7 @@ function inferHandoffFromText(text) {
     }
   };
 }
+
 
 
 // --- Accumulated raw text içinden handoff objesini çıkarır (esnek sürüm) ---
@@ -298,6 +294,24 @@ function extractHandoff(raw) {
   }
 
   return null;
+}
+
+// ---- Resolve "to" & "from" with safe fallbacks ----
+function resolveEmailRouting(brandCfg) {
+  // Alıcı (to): Öncelik sırası
+  const to =
+    brandCfg?.handoffEmailTo ||          // Marka özel handoff alıcısı
+    process.env.HANDOFF_TO ||            // Ortak ortam değişkeni
+    brandCfg?.contactEmail ||            // Markanın genel iletişim adresi
+    "eniskuru59@gmail.com";              // Son çare: test adresin
+
+  // Gönderen (from / envelope.user): Öncelik sırası
+  const from =
+    process.env.EMAIL_USER ||            // Nodemailer auth user
+    brandCfg?.noreplyEmail ||            // Marka noreply
+    "no-reply@localhost.local";          // Son çare dummy
+
+  return { to, from };
 }
 
 
@@ -529,11 +543,14 @@ if (!handoff) {
   }
 }
 
+const { to: toAddr, from: fromAddr } = resolveEmailRouting(brandCfg);
 console.log("[handoff] PREP(stream-end)", {
   sawHandoffSignal: !!handoff,
-  to: brandCfg?.handoffEmailTo || process.env.HANDOFF_TO,
-  from: process.env.EMAIL_USER
+  to: toAddr,
+  from: fromAddr
 });
+
+
 
 if (handoff) {
   try {
