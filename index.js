@@ -196,44 +196,77 @@ async function openAI(path, { method = "GET", body } = {}) {
 
 // Assistant yanıtından handoff JSON çıkar
 
-// --- Accumulated raw text içinden handoff objesini çıkarır ---
-// Desteklediğimiz formatlar:
-// 1) ```handoff { ...json... }```  (önerilen)
-// 2) <handoff> { ...json... } </handoff>
-// 3) [[HANDOFF:base64(json)]]  (opsiyonel)
+// --- Accumulated raw text içinden handoff objesini çıkarır (esnek sürüm) ---
+// Desteklenen formatlar:
+// 1) ```handoff { ...json... }```
+// 2) ```json { "handoff": { ... } }```  -> içinden handoff alır
+// 3) <handoff> { ...json... } </handoff>
+// 4) [[HANDOFF:base64(json)]]
+// JSON parse sonrası şu şekilleri kabul eder:
+//   - { kind, payload, ... }
+//   - { handoff: { kind, payload, ... } }
 function extractHandoff(raw) {
   if (!raw) return null;
 
+  const tryNormalize = (obj) => {
+    if (!obj || typeof obj !== "object") return null;
+    const candidate = obj.handoff && typeof obj.handoff === "object" ? obj.handoff : obj;
+    if (candidate && candidate.kind && candidate.payload) return candidate;
+    return null;
+  };
+
   // 1) ```handoff ... ```
-  const m1 = raw.match(/```handoff\s*([\s\S]*?)\s*```/);
-  if (m1 && m1[1]) {
-    try {
-      const obj = JSON.parse(m1[1]);
-      if (obj?.kind && obj?.payload) return obj;
-    } catch {}
+  {
+    const m = raw.match(/```handoff\s*([\s\S]*?)\s*```/i);
+    if (m && m[1]) {
+      try {
+        const obj = JSON.parse(m[1]);
+        const norm = tryNormalize(obj);
+        if (norm) return norm;
+      } catch {}
+    }
+  }
+
+  // 1.b) ```json ...``` içinde "handoff" anahtarını ara
+  {
+    const m = raw.match(/```json\s*([\s\S]*?)\s*```/i);
+    if (m && m[1]) {
+      try {
+        const obj = JSON.parse(m[1]);
+        const norm = tryNormalize(obj);
+        if (norm) return norm;
+      } catch {}
+    }
   }
 
   // 2) <handoff> ... </handoff>
-  const m2 = raw.match(/<handoff>\s*([\s\S]*?)\s*<\/handoff>/);
-  if (m2 && m2[1]) {
-    try {
-      const obj = JSON.parse(m2[1]);
-      if (obj?.kind && obj?.payload) return obj;
-    } catch {}
+  {
+    const m = raw.match(/<handoff>\s*([\s\S]*?)\s*<\/handoff>/i);
+    if (m && m[1]) {
+      try {
+        const obj = JSON.parse(m[1]);
+        const norm = tryNormalize(obj);
+        if (norm) return norm;
+      } catch {}
+    }
   }
 
-  // 3) [[HANDOFF:...]]  (opsiyonel sentinel; base64 json)
-  const m3 = raw.match(/\[\[HANDOFF:([A-Za-z0-9+/=]+)\]\]/);
-  if (m3 && m3[1]) {
-    try {
-      const json = Buffer.from(m3[1], "base64").toString("utf8");
-      const obj = JSON.parse(json);
-      if (obj?.kind && obj?.payload) return obj;
-    } catch {}
+  // 3) [[HANDOFF:...]]  (base64 json)
+  {
+    const m = raw.match(/\[\[HANDOFF:([A-Za-z0-9+/=]+)\]\]/i);
+    if (m && m[1]) {
+      try {
+        const json = Buffer.from(m[1], "base64").toString("utf8");
+        const obj = JSON.parse(json);
+        const norm = tryNormalize(obj);
+        if (norm) return norm;
+      } catch {}
+    }
   }
 
   return null;
 }
+
 
 /* ==================== Rate Limit ==================== */
 app.use(rateLimit({
@@ -447,6 +480,11 @@ while (true) {
 }
 
 // 4) Stream bitti → handoff varsa maille (brandCfg ile)
+console.log("[handoff][debug] accTextOriginal.len =", accTextOriginal.length,
+            "contains ```handoff?", /```handoff/i.test(accTextOriginal),
+            "contains <handoff>?", /<handoff>/i.test(accTextOriginal),
+            "contains [[HANDOFF:", /\[\[HANDOFF:/i.test(accTextOriginal));
+
 try {
   const defaultKind = "order";
   const defaultPayload = { full_name: "Stream Handoff", items: [] };
@@ -625,15 +663,26 @@ if (!handoff && /rezerv|rezervasyon|sipariş|order/i.test(message)) {
 
 if (handoff) {
   try {
-    
+    // brandCfg mevcut; yukarıda zaten getBrandConfig ile kontrol edildi
+    await sendHandoffEmail({
+      kind: handoff.kind,
+      payload: handoff.payload,
+      brandCfg
+    });
+    console.log("[handoff][poll] SENT", { kind: handoff.kind });
   } catch (e) {
-    console.error("handoff email failed:", e);
+    console.error("[handoff][poll] email failed:", {
+      message: e?.message,
+      code: e?.code,
+      stack: e?.stack,
+    });
   }
+
   // Kullanıcıya giden yanıttan ham bloğu (```...```) temizle
-  if (handoff.raw) {
-    text = text.replace(handoff.raw, "").trim();
-  }
+  // (Zaten aşağıda genel temizlik var; defensif olarak bırakıyoruz.)
+  text = text.replace(/```[\s\S]*?```/g, "").trim();
 }
+
 
 // Son kez garanti temizliği: tüm code-fence bloklarını sil
 text = text.replace(/```[\s\S]*?```/g, "").trim();
