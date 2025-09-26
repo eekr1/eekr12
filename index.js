@@ -27,45 +27,54 @@ function escapeHtml(s = "") {
 }
 
 async function sendHandoffEmail({ kind, payload, brandCfg }) {
-  const { to, from } = resolveEmailRouting(brandCfg);
+  const { to, from, fromName } = resolveEmailRouting(brandCfg);
 
   console.log("[handoff] sendHandoffEmail called", { kind, to, from });
 
-  // Basit subject seçimi
-  const subject = `[${brandCfg?.brandName || "barbare"}] ${(
-    kind === "reservation" ? "Yeni Rezervasyon" :
-    kind === "order"       ? "Yeni Sipariş" :
+  // Konu satırı
+  const subject = `[${brandCfg?.brandName || "barbare"}] ${
+    kind === "reservation"      ? "Yeni Rezervasyon" :
+    kind === "order"            ? "Yeni Sipariş" :
     kind === "customer_request" ? "Müşteri İsteği" :
     `Handoff: ${kind || "Bilinmiyor"}`
-  )}`;
+  }`;
 
-  // Gövde: JSON + kısa özet
-  const textSummary = (() => {
-    const c = payload?.contact || {};
-    const name = c.name || payload?.full_name || "";
-    const phone = c.phone || payload?.phone || "";
-    const email = c.email || payload?.email || "";
-    return [
-      name && `Ad: ${name}`,
-      phone && `Tel: ${phone}`,
-      email && `E-posta: ${email}`,
-    ].filter(Boolean).join("\n");
-  })();
+  // Kısa özet
+  const c = payload?.contact || {};
+  const name  = c.name  || payload?.full_name || "";
+  const phone = c.phone || payload?.phone     || "";
+  const email = c.email || payload?.email     || "";
 
-  const mailOptions = {
-    from,           // envelope & header from
-    to,             // alıcı
-    subject,
-    // HTML istersen aynı içeriği <pre> ile de atabilirsin
-    text:
+  const textSummary = [
+    name  && `Ad: ${name}`,
+    phone && `Tel: ${phone}`,
+    email && `E-posta: ${email}`,
+  ].filter(Boolean).join("\n");
+
+  // Brevo e-postasını hazırla
+  const emailObj = new SendSmtpEmail();
+  emailObj.sender      = { email: from, name: fromName };
+  emailObj.to          = [{ email: to }];
+  emailObj.subject     = subject;
+  emailObj.textContent =
 `${textSummary ? textSummary + "\n\n" : ""}Payload:
-${JSON.stringify(payload, null, 2)}`
-  };
+${JSON.stringify(payload, null, 2)}`;
+  // İstersen HTML de ekleyebilirsin:
+  emailObj.htmlContent =
+    `<pre style="font-family:ui-monospace,Menlo,Consolas,monospace">${escapeHtml(emailObj.textContent)}</pre>`;
 
-  // Not: transporter dışarıda create edilmiş olmalı (host, port, auth vs)
-  const info = await transporter.sendMail(mailOptions);
-  console.log("[mail] brevo send OK — status:", info?.response || info?.messageId, "to:", to);
+  // Gönder
+  const resp = await brevo.sendTransacEmail(emailObj);
+  const data = await readIncomingMessageJSON(resp);
+  const msgId = data?.messageId || data?.messageIds?.[0] || null;
+
+  console.log("[mail] brevo send OK — status:",
+    resp?.response?.statusCode || 201,
+    "messageId:", msgId,
+    "to:", to
+  );
 }
+
 
 
 async function readIncomingMessageJSON(resp) {
@@ -305,14 +314,20 @@ function resolveEmailRouting(brandCfg) {
     brandCfg?.contactEmail ||            // Markanın genel iletişim adresi
     "eniskuru59@gmail.com";              // Son çare: test adresin
 
-  // Gönderen (from / envelope.user): Öncelik sırası
+  // Gönderen (from): Brevo HTTP API için doğrulanmış gönderen adresi gerekir
   const from =
-    process.env.EMAIL_USER ||            // Nodemailer auth user
-    brandCfg?.noreplyEmail ||            // Marka noreply
-    "no-reply@localhost.local";          // Son çare dummy
+    process.env.EMAIL_FROM ||            // ✅ Brevo’da doğrulanmış sender
+    brandCfg?.noreplyEmail ||            // Marka noreply (doğrulanmışsa)
+    "no-reply@localhost.local";          // Son çare (gönderim reddedilebilir)
 
-  return { to, from };
+  const fromName =
+    process.env.EMAIL_FROM_NAME ||       // Örn: "Barbare Asistan"
+    brandCfg?.brandName ||               // Örn: "Barbare"
+    "Assistant";
+
+  return { to, from, fromName };
 }
+
 
 
 /* ==================== Rate Limit ==================== */
@@ -729,36 +744,6 @@ text = stripFenced(text);
     }
 
 
-// Handoff yoksa ve kullanıcı mesajında sipariş/rezervasyon niyeti seziliyorsa uyarı logu bırak
-if (!handoff && /rezerv|rezervasyon|sipariş|order/i.test(message)) {
-  console.warn("[handoff] no block found; assistant text:", text.slice(0, 500));
-}
-
-if (handoff) {
-  try {
-    // brandCfg mevcut; yukarıda zaten getBrandConfig ile kontrol edildi
-    await sendHandoffEmail({
-      kind: handoff.kind,
-      payload: handoff.payload,
-      brandCfg
-    });
-    console.log("[handoff][poll] SENT", { kind: handoff.kind });
-  } catch (e) {
-    console.error("[handoff][poll] email failed:", {
-      message: e?.message,
-      code: e?.code,
-      stack: e?.stack,
-    });
-  }
-
-  // Kullanıcıya giden yanıttan ham bloğu (```...```) temizle
-  // (Zaten aşağıda genel temizlik var; defensif olarak bırakıyoruz.)
-  text = text.replace(/```[\s\S]*?```/g, "").trim();
-}
-
-
-// Son kez garanti temizliği: tüm code-fence bloklarını sil
-text = text.replace(/```[\s\S]*?```/g, "").trim();
 
 return res.json({
   status: "ok",
