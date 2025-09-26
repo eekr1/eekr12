@@ -196,32 +196,42 @@ async function openAI(path, { method = "GET", body } = {}) {
 
 // Assistant yanıtından handoff JSON çıkar
 
-function extractHandoff(text) {
-  if (!text) return null;
+// --- Accumulated raw text içinden handoff objesini çıkarır ---
+// Desteklediğimiz formatlar:
+// 1) ```handoff { ...json... }```  (önerilen)
+// 2) <handoff> { ...json... } </handoff>
+// 3) [[HANDOFF:base64(json)]]  (opsiyonel)
+function extractHandoff(raw) {
+  if (!raw) return null;
 
-  // 1) Etiketli blok: ```handoff:order ...``` | ```handoff:reservation ...```
-  const tagged = /```handoff:(reservation|order)\s*([\s\S]*?)```/i.exec(text);
-  if (tagged) {
-    const kind = tagged[1].toLowerCase();
+  // 1) ```handoff ... ```
+  const m1 = raw.match(/```handoff\s*([\s\S]*?)\s*```/);
+  if (m1 && m1[1]) {
     try {
-      const payload = JSON.parse(tagged[2]);
-      return { kind, payload, raw: tagged[0] };
-    } catch (e) {
-      console.error("handoff JSON parse error (tagged):", e);
-    }
+      const obj = JSON.parse(m1[1]);
+      if (obj?.kind && obj?.payload) return obj;
+    } catch {}
   }
 
-  // 2) Etiket yoksa: herhangi bir ```json ...``` bloÄŸu
-  const blocks = [...text.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)];
-  for (const m of blocks) {
+  // 2) <handoff> ... </handoff>
+  const m2 = raw.match(/<handoff>\s*([\s\S]*?)\s*<\/handoff>/);
+  if (m2 && m2[1]) {
     try {
-      const payload = JSON.parse(m[1]);
-      const isOrder = Array.isArray(payload?.items) && payload.items.length > 0;
-      const isReservation = !!(payload?.party_size && payload?.date && payload?.time);
-      if (isOrder)       return { kind: "order",       payload, raw: m[0] };
-      if (isReservation) return { kind: "reservation", payload, raw: m[0] };
-    } catch (_e) {}
+      const obj = JSON.parse(m2[1]);
+      if (obj?.kind && obj?.payload) return obj;
+    } catch {}
   }
+
+  // 3) [[HANDOFF:...]]  (opsiyonel sentinel; base64 json)
+  const m3 = raw.match(/\[\[HANDOFF:([A-Za-z0-9+/=]+)\]\]/);
+  if (m3 && m3[1]) {
+    try {
+      const json = Buffer.from(m3[1], "base64").toString("utf8");
+      const obj = JSON.parse(json);
+      if (obj?.kind && obj?.payload) return obj;
+    } catch {}
+  }
+
   return null;
 }
 
@@ -438,8 +448,7 @@ while (true) {
 
 // 4) Stream bitti → handoff varsa maille (brandCfg ile)
 try {
-  // Güvenli varsayılanlar (kind/payload üst scope’ta yoksa)
-  const defaultKind = "order"; // gerekirse "reservation" yap
+  const defaultKind = "order";
   const defaultPayload = { full_name: "Stream Handoff", items: [] };
 
   console.log("[handoff] PREP(stream-end)", {
@@ -448,14 +457,11 @@ try {
     from: brandCfg?.email_from || process.env.EMAIL_FROM,
   });
 
-  // Metinden handoff objesini çıkar (kind/payload vs.)
   const handoff = extractHandoff(accTextOriginal);
 
   if (handoff || sawHandoffSignal) {
-    // extractHandoff dönerse onu kullan; yoksa varsayılanlarla gönder
     const finalHandoff = handoff || { kind: defaultKind, payload: defaultPayload };
 
-    // Göndermeden önce son kontroller
     if (!(brandCfg?.email_to || process.env.EMAIL_TO)) {
       throw new Error("EMAIL_TO / brandCfg.email_to tanımlı değil.");
     }
@@ -463,8 +469,6 @@ try {
       throw new Error("EMAIL_FROM / brandCfg.email_from tanımlı değil.");
     }
 
-    // (İsteğe bağlı) mail gönderme satırı sende zaten varsa bırak;
-    // burada bırakıyorum ki akış tamam olsun
     const mailResp = await sendHandoffEmail({ ...finalHandoff, brandCfg });
     console.log("[handoff][stream] SENT", mailResp);
   } else {
@@ -477,7 +481,6 @@ try {
     stack: e?.stack,
   });
 }
-
 // 5) Bitiş işareti
 try {
   res.write("data: [DONE]\n\n");
