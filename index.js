@@ -196,6 +196,39 @@ async function openAI(path, { method = "GET", body } = {}) {
 
 // Assistant yanıtından handoff JSON çıkar
 
+// --- Metinden handoff çıkarımı (fallback) ---
+// Model handoff bloğu üretmediyse, müşteri temsilcisine devri gerektiren
+// ifadeleri yakalayıp minimal bir handoff objesi döner.
+function inferHandoffFromText(text) {
+  if (!text) return null;
+
+  // Es Eskalasyon ipuçları (TR ağırlıklı örnekler):
+  const ESCALATE = /(temsilcimize ilet|kesin yanıt veremiyorum|kimlik|yaş doğrulaması|rezervasyon|sipariş(?!iniz alınmıştır)|stok (doğrula|durumu)|fatura bilgisi|iade onayı|özel durum)/i;
+  if (!ESCALATE.test(text)) return null;
+
+  // Basit çıkarımlar (varsa)
+  const phoneMatch = text.match(/(\+?\d[\d\s().-]{9,}\d)/);
+  const emailMatch = text.match(/[^\s@]+@[^\s@]+\.[^\s@]+/);
+  const phone = phoneMatch ? phoneMatch[1].trim() : undefined;
+  const email = emailMatch ? emailMatch[0].trim() : undefined;
+
+  // Sipariş/ad/ürün gibi olası alanlar varsa al (çok kaba çıkarım)
+  const nameMatch = text.match(/ad[ıi]\s*[:\-]\s*([^\n,]+)/i);
+  const addrMatch = text.match(/adres[ıi]\s*[:\-]\s*([^\n]+)/i);
+  const orderMatch = text.match(/sipariş\s*[:\-]\s*([^\n]+)/i);
+
+  return {
+    kind: "customer_request",
+    payload: {
+      contact: { phone, email, name: nameMatch?.[1]?.trim() },
+      address: addrMatch?.[1]?.trim(),
+      orderSummary: orderMatch?.[1]?.trim(),
+      transcript: text.length > 4000 ? text.slice(-4000) : text
+    }
+  };
+}
+
+
 // --- Accumulated raw text içinden handoff objesini çıkarır (esnek sürüm) ---
 // Desteklenen formatlar:
 // 1) ```handoff { ...json... }```
@@ -485,40 +518,36 @@ console.log("[handoff][debug] accTextOriginal.len =", accTextOriginal.length,
             "contains <handoff>?", /<handoff>/i.test(accTextOriginal),
             "contains [[HANDOFF:", /\[\[HANDOFF:/i.test(accTextOriginal));
 
-try {
-  const defaultKind = "order";
-  const defaultPayload = { full_name: "Stream Handoff", items: [] };
+let handoff = extractHandoff(accTextOriginal);
 
-  console.log("[handoff] PREP(stream-end)", {
-    sawHandoffSignal,
-    to: brandCfg?.email_to || process.env.EMAIL_TO,
-    from: brandCfg?.email_from || process.env.EMAIL_FROM,
-  });
-
-  const handoff = extractHandoff(accTextOriginal);
-
-  if (handoff || sawHandoffSignal) {
-    const finalHandoff = handoff || { kind: defaultKind, payload: defaultPayload };
-
-    if (!(brandCfg?.email_to || process.env.EMAIL_TO)) {
-      throw new Error("EMAIL_TO / brandCfg.email_to tanımlı değil.");
-    }
-    if (!(brandCfg?.email_from || process.env.EMAIL_FROM)) {
-      throw new Error("EMAIL_FROM / brandCfg.email_from tanımlı değil.");
-    }
-
-    const mailResp = await sendHandoffEmail({ ...finalHandoff, brandCfg });
-    console.log("[handoff][stream] SENT", mailResp);
-  } else {
-    console.log("[handoff][stream] no handoff block/signal found");
+// Fallback: explicit block yoksa metinden çıkar
+if (!handoff) {
+  const inferred = inferHandoffFromText(accTextOriginal);
+  if (inferred) {
+    handoff = inferred;
+    console.log("[handoff][fallback] inferred from text");
   }
-} catch (e) {
-  console.error("[handoff][stream] email failed:", {
-    message: e?.message,
-    code: e?.code,
-    stack: e?.stack,
-  });
 }
+
+console.log("[handoff] PREP(stream-end)", {
+  sawHandoffSignal: !!handoff,
+  to: brandCfg?.handoffEmailTo || process.env.HANDOFF_TO,
+  from: process.env.EMAIL_USER
+});
+
+if (handoff) {
+  try {
+    await sendHandoffEmail({ kind: handoff.kind, payload: handoff.payload, brandCfg });
+    console.log("[handoff][stream] SENT");
+  } catch (e) {
+    console.error("[handoff][stream] email failed:", {
+      message: e?.message, code: e?.code, stack: e?.stack
+    });
+  }
+} else {
+  console.log("[handoff][stream] no handoff block/signal found");
+}
+
 // 5) Bitiş işareti
 try {
   res.write("data: [DONE]\n\n");
@@ -654,7 +683,34 @@ text = stripFenced(text);
     // â¬†ï¸â¬†ï¸â¬†ï¸
 
    // --- Handoff JSON çıkar + e-posta ile gönder (brandConfig ile) ---
-const handoff = extractHandoff(text);
+    let handoff = extractHandoff(text);
+    // explicit yoksa metinden üret
+    if (!handoff) {
+      const inferred = inferHandoffFromText(text);
+      if (inferred) {
+        handoff = inferred;
+        console.log("[handoff][fallback][poll] inferred from text");
+      }
+    }
+
+    if (handoff) {
+      try {
+        await sendHandoffEmail({
+          kind: handoff.kind,
+          payload: handoff.payload,
+          brandCfg
+        });
+        console.log("[handoff][poll] SENT", { kind: handoff.kind });
+      } catch (e) {
+        console.error("[handoff][poll] email failed:", {
+          message: e?.message, code: e?.code, stack: e?.stack
+        });
+      }
+
+      // Kullanıcıya dönen metinden gizli blokları temizle (defensive)
+      text = text.replace(/```[\s\S]*?```/g, "").trim();
+    }
+
 
 // Handoff yoksa ve kullanıcı mesajında sipariş/rezervasyon niyeti seziliyorsa uyarı logu bırak
 if (!handoff && /rezerv|rezervasyon|sipariş|order/i.test(message)) {
