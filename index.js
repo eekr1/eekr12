@@ -523,6 +523,35 @@ function sanitizeHandoffPayload(payload, kind, brandCfg) {
   return out;
 }
 
+// Metinden rezervasyon niyeti sezer (rez/mahzen/bağ/tadım + tarih/saat ipucu)
+function inferReservationIntentFromText(t) {
+  if (!t) return false;
+  const s = String(t).toLowerCase();
+
+  const rezWords = /(rez|rezervasyon|tadım|tur|mahzen|bağ|özel etkinlik)/i.test(s);
+  const timeWords = /(tarih|saat)/i.test(s);
+  const isoDate = /\b20\d{2}-\d{2}-\d{2}\b/.test(s);
+  const clock = /\b([01]\d|2[0-3]):[0-5]\d\b/.test(s);
+
+  return rezWords && (timeWords || isoDate || clock);
+}
+
+// Payload şekline bakıp customer_request → reservation zorlaması
+function coerceKindByPayload(h) {
+  try {
+    if (!h || !h.payload) return h;
+    const p = h.payload;
+    const hasResSignals = !!(p.party_size || p.date || p.time || p.experience || p.room);
+    if (h.kind === "customer_request" && hasResSignals) {
+      return { ...h, kind: "reservation" };
+    }
+    return h;
+  } catch {
+    return h;
+  }
+}
+
+
 
 
 /* ==================== Rate Limit ==================== */
@@ -757,6 +786,13 @@ if (!handoff) {
   }
 }
 
+// Fallback sonrası hâlâ handoff yoksa ve metin "rezervasyon" kokuyorsa, reservation’a zorla
+if (!handoff && inferReservationIntentFromText(accTextOriginal)) {
+  handoff = { kind: "reservation", payload: {} };
+  console.log("[handoff][fallback] forced reservation by text intent");
+}
+
+
 const { to: toAddr, from: fromAddr } = resolveEmailRouting(brandCfg);
 
 console.log("[handoff] PREP(stream-end)", {
@@ -769,6 +805,9 @@ console.log("[handoff] PREP(stream-end)", {
 
 if (handoff) {
   try {
+        // Payload'ta rezervasyon sinyali varsa, customer_request'ı reservation'a çevir
+    handoff = coerceKindByPayload(handoff);
+
     const clean = sanitizeHandoffPayload(handoff.payload, handoff.kind, brandCfg);
     await sendHandoffEmail({ kind: handoff.kind, payload: clean, brandCfg });
     console.log("[handoff][stream] SENT");
@@ -929,6 +968,8 @@ text = stripFenced(text);
 
     if (handoff) {
   try {
+      // ⬇️ önce kind'ı düzelt
+    handoff = coerceKindByPayload(handoff);
     const clean = sanitizeHandoffPayload(handoff.payload, handoff.kind, brandCfg);
     await sendHandoffEmail({
       kind: handoff.kind,
