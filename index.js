@@ -39,11 +39,13 @@ async function sendHandoffEmail({ brandKey, brandCfg, kind, payload }) {
       brandCfg.contactEmail;
     if (!to) throw new Error("No recipient found for handoff email (to).");
 
-    // Gönderen (doğrulanmış)
+    // Gönderen (Brevo’da doğrulanmış olmalı)
     const from = brandCfg.noreplyEmail || process.env.EMAIL_FROM;
+    const fromName =
+      process.env.EMAIL_FROM_NAME || brandCfg.brandName || brandCfg.label || brandKey;
     if (!from) throw new Error("No verified sender configured (from).");
 
-    // Reply-To: müşteriye yazılsın
+    // Reply-To: müşteriye yazılsın (varsa)
     const replyTo =
       payload?.contact?.email ||
       payload?.email ||
@@ -54,9 +56,7 @@ async function sendHandoffEmail({ brandKey, brandCfg, kind, payload }) {
     const normalize = (s) => (s || "").toString().trim();
     const exp = normalize(payload?.experience || payload?.tour || payload?.request?.summary);
     const size = payload?.party_size ? `${payload.party_size} kişi` : null;
-    const dt = [normalize(payload?.date), normalize(payload?.time)]
-      .filter(Boolean)
-      .join(" ");
+    const dt = [normalize(payload?.date), normalize(payload?.time)].filter(Boolean).join(" ");
     const intentLabel =
       kind === "reservation"
         ? (exp ? `Rezervasyon — ${exp}` : "Rezervasyon")
@@ -69,9 +69,7 @@ async function sendHandoffEmail({ brandKey, brandCfg, kind, payload }) {
 
     // ----- İçerik (TEXT + HTML) -----
     const kv = [];
-
-    // Kontakt
-    const name = normalize(payload?.contact?.name || payload?.full_name);
+    const name  = normalize(payload?.contact?.name || payload?.full_name);
     const phone = normalize(payload?.contact?.phone || payload?.phone);
     const email = normalize(payload?.contact?.email || payload?.email);
 
@@ -91,7 +89,6 @@ async function sendHandoffEmail({ brandKey, brandCfg, kind, payload }) {
       if (payload?.request?.details) kv.push(["Açıklama", normalize(payload.request.details)]);
     }
 
-    // TEXT gövde
     const textLines = [];
     textLines.push(`Tür: ${kind}`);
     kv.forEach(([k, v]) => textLines.push(`${k}: ${v}`));
@@ -99,7 +96,6 @@ async function sendHandoffEmail({ brandKey, brandCfg, kind, payload }) {
     textLines.push(`Kaynak Marka: ${brandCfg.label || brandKey}`);
     const textBody = textLines.join("\n");
 
-    // HTML gövde — okunur tablo
     const htmlRows = kv
       .map(([k, v]) => `<tr><td style="padding:6px 10px;border:1px solid #eee;font-weight:600;">${k}</td><td style="padding:6px 10px;border:1px solid #eee;">${(v || "").replace(/</g,"&lt;")}</td></tr>`)
       .join("");
@@ -111,24 +107,40 @@ async function sendHandoffEmail({ brandKey, brandCfg, kind, payload }) {
       </div>
     `;
 
-    const mail = {
-      to,
-      from,
-      subject,
-      text: textBody,
-      html: htmlBody
-    };
-    if (replyTo) mail.replyTo = replyTo;
+    // ----- Brevo HTTP API ile gönder -----
+    // Çoklu alıcı desteği (virgülle ayrılmışsa)
+    const toList = to.split(",").map(e => ({ email: e.trim() })).filter(x => x.email);
+
+    const emailObj = new SendSmtpEmail();
+    emailObj.sender      = { email: from, name: fromName };
+    emailObj.to          = toList;
+    emailObj.subject     = subject;
+    emailObj.htmlContent = htmlBody;
+    emailObj.textContent = textBody;
+
+    // Brevo SDK destekliyorsa direkt replyTo kullan; değilse header üzerinden ilet
+    if (replyTo) {
+      // Çoğu sürümde string replyTo destekli
+      emailObj.replyTo = replyTo;
+      // Emniyet için header da set edelim
+      emailObj.headers = { ...(emailObj.headers || {}), "Reply-To": replyTo };
+    }
 
     console.log("[handoff] sendHandoffEmail called", { kind, to, from, replyTo, subject });
-    await mailClient.send(mail);
-    console.log("[handoff] sendHandoffEmail OK");
-    return { ok: true };
+    const resp = await brevo.sendTransacEmail(emailObj);
+
+    // (opsiyonel) Brevo response’tan messageId çıkarmak için helper:
+    const data  = await readIncomingMessageJSON(resp);
+    const msgId = data?.messageId || data?.messageIds?.[0] || null;
+
+    console.log("[handoff] sendHandoffEmail OK", { messageId: msgId });
+    return { ok: true, messageId: msgId };
   } catch (err) {
     console.error("[handoff] sendHandoffEmail ERROR", err);
     return { ok: false, error: String(err?.message || err) };
   }
 }
+
 
 
 
