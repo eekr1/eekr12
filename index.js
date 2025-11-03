@@ -28,8 +28,14 @@ function escapeHtml(s = "") {
 
 async function sendHandoffEmail({ brandKey, brandCfg, kind, payload }) {
   try {
+    // Tek bir label değişkeni: undefined görünmesin
+    const brandLabel =
+      brandCfg.label ||
+      brandCfg.brandName ||
+      brandKey;
+
     const subjectPrefix =
-      brandCfg.subject_prefix || `[${brandCfg.label || brandKey}]`;
+      brandCfg.subject_prefix || `[${brandLabel}]`;
 
     // Alıcı önceliği
     const to =
@@ -42,26 +48,20 @@ async function sendHandoffEmail({ brandKey, brandCfg, kind, payload }) {
     // Gönderen (Brevo’da doğrulanmış olmalı)
     const from = brandCfg.noreplyEmail || process.env.EMAIL_FROM;
     const fromName =
-      process.env.EMAIL_FROM_NAME || brandCfg.brandName || brandCfg.label || brandKey;
-    if (!from) throw new Error("No verified sender configured (from).");
-
-    // Reply-To: müşteriye yazılsın (varsa)
-    const replyTo =
-      payload?.contact?.email ||
-      payload?.email ||
-      process.env.REPLY_TO ||
-      null;
+      process.env.EMAIL_FROM_NAME || brandCfg.brandName || brandLabel;
+    if (!from) {
+      throw new Error("No verified sender configured (from). Use brand.noreplyEmail or EMAIL_FROM env.");
+    }
 
     // ----- Akıllı konu satırı -----
     const normalize = (s) => (s || "").toString().trim();
-    const exp = normalize(payload?.experience || payload?.tour || payload?.request?.summary);
+    const exp  = normalize(payload?.experience || payload?.tour || payload?.request?.summary);
     const size = payload?.party_size ? `${payload.party_size} kişi` : null;
-    const dt = [normalize(payload?.date), normalize(payload?.time)].filter(Boolean).join(" ");
+    const dt   = [normalize(payload?.date), normalize(payload?.time)].filter(Boolean).join(" ");
     const intentLabel =
       kind === "reservation"
         ? (exp ? `Rezervasyon — ${exp}` : "Rezervasyon")
         : (payload?.request?.summary ? `Müşteri İsteği — ${payload.request.summary}` : "Müşteri İsteği");
-
     const tailBits = [size, dt].filter(Boolean).join(" | ");
     const subject = tailBits
       ? `${subjectPrefix} ${intentLabel} (${tailBits})`
@@ -73,29 +73,31 @@ async function sendHandoffEmail({ brandKey, brandCfg, kind, payload }) {
     const phone = normalize(payload?.contact?.phone || payload?.phone);
     const email = normalize(payload?.contact?.email || payload?.email);
 
-    if (name)  kv.push(["Ad Soyad", name]);
-    if (phone) kv.push(["Telefon", phone]);
-    if (email) kv.push(["E-posta", email]);
+    if (name)  kv.push(["Ad Soyad",  name]);
+    if (phone) kv.push(["Telefon",   phone]);
+    if (email) kv.push(["E-posta",   email]);
 
     if (kind === "reservation") {
       if (payload?.experience) kv.push(["Deneyim/Tur", normalize(payload.experience)]);
-      if (payload?.room)       kv.push(["Oda/Alan", normalize(payload.room)]);
+      if (payload?.room)       kv.push(["Oda/Alan",    normalize(payload.room)]);
       if (payload?.party_size) kv.push(["Kişi Sayısı", String(payload.party_size)]);
-      if (payload?.date)       kv.push(["Tarih", normalize(payload.date)]);
-      if (payload?.time)       kv.push(["Saat", normalize(payload.time)]);
-      if (payload?.notes)      kv.push(["Notlar", normalize(payload.notes)]);
+      if (payload?.date)       kv.push(["Tarih",       normalize(payload.date)]);
+      if (payload?.time)       kv.push(["Saat",        normalize(payload.time)]);
+      if (payload?.notes)      kv.push(["Notlar",      normalize(payload.notes)]);
     } else {
-      if (payload?.request?.summary) kv.push(["Konu", normalize(payload.request.summary)]);
-      if (payload?.request?.details) kv.push(["Açıklama", normalize(payload.request.details)]);
+      if (payload?.request?.summary) kv.push(["Konu",      normalize(payload.request.summary)]);
+      if (payload?.request?.details) kv.push(["Açıklama",  normalize(payload.request.details)]);
     }
 
+    // TEXT
     const textLines = [];
     textLines.push(`Tür: ${kind}`);
     kv.forEach(([k, v]) => textLines.push(`${k}: ${v}`));
     textLines.push("");
-    textLines.push(`Kaynak Marka: ${brandCfg.label || brandKey}`);
+    textLines.push(`Kaynak Marka: ${brandLabel}`);
     const textBody = textLines.join("\n");
 
+    // HTML
     const htmlRows = kv
       .map(([k, v]) => `<tr><td style="padding:6px 10px;border:1px solid #eee;font-weight:600;">${k}</td><td style="padding:6px 10px;border:1px solid #eee;">${(v || "").replace(/</g,"&lt;")}</td></tr>`)
       .join("");
@@ -103,13 +105,21 @@ async function sendHandoffEmail({ brandKey, brandCfg, kind, payload }) {
       <div style="font-family:system-ui, -apple-system, 'Segoe UI', Roboto, Arial; line-height:1.5; color:#111;">
         <p style="margin:0 0 10px 0;"><strong>Tür:</strong> ${kind}</p>
         <table style="border-collapse:collapse;border:1px solid #eee;min-width:420px;">${htmlRows}</table>
-        <p style="margin:12px 0 0 0; color:#555;">Kaynak Marka: ${brandCfg.label || brandKey}</p>
+        <p style="margin:12px 0 0 0; color:#555;">Kaynak Marka: ${brandLabel}</p>
       </div>
     `;
 
-    // ----- Brevo HTTP API ile gönder -----
-    // Çoklu alıcı desteği (virgülle ayrılmışsa)
+    // ----- Brevo HTTP API objesi -----
     const toList = to.split(",").map(e => ({ email: e.trim() })).filter(x => x.email);
+
+    // replyTo: sadece geçerliyse ekle (Brevo objesi bekler: { email, name? })
+    const rawReplyTo =
+      payload?.contact?.email ||
+      payload?.email ||
+      process.env.REPLY_TO ||
+      null;
+    const replyToEmail = (rawReplyTo || "").toString().trim();
+    const isReplyToValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(replyToEmail);
 
     const emailObj = new SendSmtpEmail();
     emailObj.sender      = { email: from, name: fromName };
@@ -118,18 +128,18 @@ async function sendHandoffEmail({ brandKey, brandCfg, kind, payload }) {
     emailObj.htmlContent = htmlBody;
     emailObj.textContent = textBody;
 
-    // Brevo SDK destekliyorsa direkt replyTo kullan; değilse header üzerinden ilet
-    if (replyTo) {
-      // Çoğu sürümde string replyTo destekli
-      emailObj.replyTo = replyTo;
-      // Emniyet için header da set edelim
-      emailObj.headers = { ...(emailObj.headers || {}), "Reply-To": replyTo };
+    if (isReplyToValid) {
+      emailObj.replyTo = { email: replyToEmail };             // ✅ Brevo doğru format
+      emailObj.headers = { ...(emailObj.headers || {}), "Reply-To": replyToEmail };
     }
 
-    console.log("[handoff] sendHandoffEmail called", { kind, to, from, replyTo, subject });
+    console.log("[handoff] sendHandoffEmail called", {
+      kind, to, from, replyTo: isReplyToValid ? replyToEmail : null, subject
+    });
+
     const resp = await brevo.sendTransacEmail(emailObj);
 
-    // (opsiyonel) Brevo response’tan messageId çıkarmak için helper:
+    // (opsiyonel) Brevo response’tan messageId çıkar
     const data  = await readIncomingMessageJSON(resp);
     const msgId = data?.messageId || data?.messageIds?.[0] || null;
 
@@ -140,6 +150,7 @@ async function sendHandoffEmail({ brandKey, brandCfg, kind, payload }) {
     return { ok: false, error: String(err?.message || err) };
   }
 }
+
 
 
 
@@ -523,14 +534,22 @@ function sanitizeHandoffPayload(payload, kind, brandCfg) {
   }
 
   // 3) reservation için deneyim boşsa, notlardan tahmin et
-  if (kind === "reservation") {
-    const hasExp = !!(out.experience || out.tour);
-    if (!hasExp) {
-      const notes = (out.notes || "").toString();
-      if (/mahzen/i.test(notes)) out.experience = "Mahzen Turu";
-      else if (/bağ/i.test(notes)) out.experience = "Bağ Turu";
-    }
+if (kind === "reservation") {
+  // deneyim: yoksa notlardan tahmin et
+  const hasExp = !!(out.experience || out.tour);
+  if (!hasExp) {
+    const notes = (out.notes || "").toString();
+    if (/mahzen/i.test(notes)) out.experience = "Mahzen Turu";
+    else if (/bağ/i.test(notes)) out.experience = "Bağ Turu";
   }
+
+  // ⛔️ Minimum çekirdek alan yoksa mail atma (ilk "rez başlatıldı" mesajını engeller)
+  const hasAnyCore =
+    !!(out.date || out.time || out.party_size || out.experience || out.room);
+  if (!hasAnyCore) {
+    throw new Error("reservation validation failed (empty payload)");
+  }
+}
 
   return out;
 }
