@@ -236,7 +236,7 @@ function buildRunInstructions(brandKey, brandCfg = {}) {
     brandKey;
 
   return [
-    `You are the official AI customer service assistant for "${label}".`,
+     `You are the official AI customer service assistant for "${label}".`,
     `Language: Turkish. Tone: kısa, sıcak, doğal; 1–2 emoji kullan. Asla aşırı resmi olma.`,
     `Scope: Sadece "${label}" ile ilgili konularda yanıt ver. Off-topic ise nazikçe sınır koy:`,
     `  "Bu konuda elimde bilgi bulunmuyor, yalnızca ${label} ile ilgili soruları yanıtlayabilirim. 🙂"`,
@@ -249,23 +249,19 @@ function buildRunInstructions(brandKey, brandCfg = {}) {
     `- Kullanıcı rezervasyon/tadım/etkinlik istiyorsa netleştir:`,
     `  • Deneyim/Tur: "Mahzen Turu", "Bağ Turu", "Tadım", "Özel Etkinlik" vb.`,
     `  • Kişi sayısı (party_size)`,
-    `  • Tarih (YYYY-AA-GG) ve saat (SS:DD)`,
+    `  • Tarih ve saat — KULLANICI FORMATINA TAKILMA. "05.11.2025", "5/11/2025", "5 kasım 2025", "14.00", "14 00" vb. kabul et; sistemi bunları kendisi normalize eder.`,
     `  • Oda/Alan (varsa): "standart", "özel oda" vb.`,
     `  • Notlar`,
-    `- Bu alanları aldıktan sonra özet cümle yaz ve uygun handoff blok formatını üret.`,
+    `- Bu alanlar netleşince özet cümle yaz ve uygun handoff blok formatını üret.`,
 
     ``,
     `Handoff Protokolü (EVRENSEL İSTEK):`,
     `- "customer_request" handoff'u SADECE şu durumlarda üret:`,
     `  1) Kullanıcı açıkça "ekibe ilet", "iletişim kurun", "biri beni arasın", "talep oluştur" vb. söylerse; VEYA`,
     `  2) Sen, "isterseniz ekibe iletebilirim" diye sorup kullanıcının "evet" şeklinde ONAYINI aldıysan.`,
-    `- Kendi bilgilendirmeni/önerini ASLA müşteri isteği gibi iletme. (Kendi yazdığın metni 'transcript' olarak iletme.)`,
-    `- Eksikse şu alanları tek mesajda iste:`,
-    `  1) Ad Soyad`,
-    `  2) Telefon Numarası (en az 10 rakam; +, boşluk, (), - kabul)`,
-    `  3) (Varsa) E-posta`,
-    `  4) Durum/Talep Özeti (kısa, net başlık + 1–3 cümle)`,
-    `- Hepsi hazırsa önce tek cümle özet yaz, sonra AŞAĞIDAKİ gizli fenced bloğu üret:`,
+    `- Kendi bilgilendirmeni/önerini ASLA müşteri isteği gibi iletme.`,
+    `- Eksikse şu alanları tek mesajda iste: 1) Ad Soyad  2) Telefon (10+ rakam)  3) (Varsa) E-posta  4) Durum Özeti`,
+    `- Hepsi hazırsa önce kısa özet, sonra gizli fenced blok (handoff) üret.`,
 
     `  \\\`\\\`\\\`handoff`,
     `  {`,
@@ -277,12 +273,8 @@ function buildRunInstructions(brandKey, brandCfg = {}) {
     `  }`,
     `  \\\`\\\`\\\``,
 
-    `- Kullanıcıya yalnızca doğal dil yanıtını göster; fenced blok istemci tarafından gizlenecek.`,
-    `- Sipariş/rezervasyon akışlarında reservation/order protokollerini kullan.`,
-
     ``,
     `Reservation Handoff Örneği (deneyim bilgisi dahil):`,
-    `- Tüm alanlar netleşince şu formatta üret:`,
     `  \\\`\\\`\\\`handoff`,
     `  {`,
     `    "handoff": "reservation",`,
@@ -293,8 +285,8 @@ function buildRunInstructions(brandKey, brandCfg = {}) {
     `      "party_size": <sayı>,`,
     `      "experience": "<Mahzen Turu | Bağ Turu | Tadım | Özel Etkinlik>",`,
     `      "room": "<varsa: standart/özel>",`,
-    `      "date": "YYYY-AA-GG",`,
-    `      "time": "SS:DD",`,
+    `      "date": "<tarih (her format kabul)→sistem normalize eder>",`,
+    `      "time": "<saat (14, 14 00, 14.00, 14:00 → normalize)>",`,
     `      "notes": "<opsiyonel>"`,
     `    }`,
     `  }`,
@@ -535,15 +527,25 @@ function sanitizeHandoffPayload(payload, kind, brandCfg) {
 
   // 3) reservation için deneyim boşsa, notlardan tahmin et
 if (kind === "reservation") {
-  // deneyim: yoksa notlardan tahmin et
+  // 1) Kullanıcının yazdığı tarih/saat formatını TR mantığıyla normalize et
+  if (out.date) {
+    const iso = normalizeDateTR(out.date);
+    if (iso) out.date = iso;
+  }
+  if (out.time) {
+    const t = normalizeTimeTR(out.time);
+    if (t) out.time = t;
+  }
+
+  // 2) Deneyim: yoksa notlardan tahmin et
   const hasExp = !!(out.experience || out.tour);
   if (!hasExp) {
     const notes = (out.notes || "").toString();
     if (/mahzen/i.test(notes)) out.experience = "Mahzen Turu";
-    else if (/bağ/i.test(notes)) out.experience = "Bağ Turu";
+    else if (/(bağ|bag)/i.test(notes)) out.experience = "Bağ Turu";
   }
 
-  // ⛔️ Minimum çekirdek alan yoksa mail atma (ilk "rez başlatıldı" mesajını engeller)
+  // 3) Minimum çekirdek alanlardan en az biri olmalı; yoksa "boş rez maili" atma
   const hasAnyCore =
     !!(out.date || out.time || out.party_size || out.experience || out.room);
   if (!hasAnyCore) {
@@ -551,8 +553,79 @@ if (kind === "reservation") {
   }
 }
 
+
   return out;
 }
+
+// --- TR tarih/saat normalizasyon helpers ---
+function normalizeDateTR(input) {
+  if (!input) return null;
+  let s = String(input).trim().toLowerCase().replace(/\s+/g, " ");
+
+  // 1) dd.mm.yyyy | dd/mm/yyyy | dd-mm-yyyy | dd mm yyyy
+  let m = s.match(/^(\d{1,2})[.\-/ ](\d{1,2})[.\-/ ](\d{4})$/);
+  if (m) {
+    let dd = parseInt(m[1], 10), mm = parseInt(m[2], 10), yyyy = parseInt(m[3], 10);
+    if (mm >= 1 && mm <= 12 && dd >= 1 && dd <= 31) {
+      return `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+    }
+  }
+
+  // 2) dd <ay adı> yyyy  (ör. 5 kasım 2025)
+  const aylar = {
+    "ocak": 1, "şubat": 2, "subat": 2, "mart": 3, "nisan": 4, "mayıs": 5, "mayis": 5,
+    "haziran": 6, "temmuz": 7, "ağustos": 8, "agustos": 8, "eylül": 9, "eylul": 9,
+    "ekim": 10, "kasım": 11, "kasim": 11, "aralık": 12, "aralik": 12
+  };
+  m = s.match(/^(\d{1,2})\s+([a-zçğıöşü]+)\s+(\d{4})$/i);
+  if (m) {
+    const dd = parseInt(m[1], 10);
+    const mm = aylar[m[2]] || null;
+    const yyyy = parseInt(m[3], 10);
+    if (mm && dd >= 1 && dd <= 31) {
+      return `${yyyy}-${String(mm).padStart(2, "0")}-${String(dd).padStart(2, "0")}`;
+    }
+  }
+
+  // 3) yyyy-mm-dd zaten ISO ise dokunma
+  if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+  return null; // tanıyamadı
+}
+
+function normalizeTimeTR(input) {
+  if (!input) return null;
+  let s = String(input).trim().toLowerCase();
+
+  // 1) 14.00 → 14:00
+  s = s.replace(/\./g, ":").replace(/\s+/g, " ");
+
+  // 2) "14:00" veya "14 00" veya "14"
+  let m = s.match(/^(\d{1,2})(?::|\s)?(\d{2})?$/);
+  if (m) {
+    let hh = parseInt(m[1], 10);
+    let mm = m[2] ? parseInt(m[2], 10) : 0;
+    if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59) {
+      return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+    }
+  }
+
+  // 3) 2:30 pm / 2 pm vb. (hafif destek)
+  m = s.match(/^(\d{1,2})(?::(\d{2}))?\s*(am|pm)$/);
+  if (m) {
+    let hh = parseInt(m[1], 10);
+    let mm = m[2] ? parseInt(m[2], 10) : 0;
+    const ap = m[3];
+    if (ap === "pm" && hh < 12) hh += 12;
+    if (ap === "am" && hh === 12) hh = 0;
+    if (hh >= 0 && hh <= 23 && mm >= 0 && mm <= 59) {
+      return `${String(hh).padStart(2, "0")}:${String(mm).padStart(2, "0")}`;
+    }
+  }
+
+  if (/^\d{2}:\d{2}$/.test(s)) return s; // zaten uygun
+  return null;
+}
+
 
 // Metinden rezervasyon niyeti sezer (rez/mahzen/bağ/tadım + tarih/saat ipucu)
 function inferReservationIntentFromText(t) {
@@ -581,6 +654,8 @@ function coerceKindByPayload(h) {
     return h;
   }
 }
+
+
 
 
 
