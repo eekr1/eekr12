@@ -5,6 +5,33 @@
   <title>Barbare Asistan • Canlı Destek</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
+
+        /* === EMBED MODU (iframe için) === */
+    body.embed{
+      background: transparent;        /* Arka planı sayfa değil, panel hissi */
+      padding: 0;
+      min-height: 100vh;
+      align-items: stretch;
+      justify-content: stretch;
+    }
+
+    body.embed .chat-wrap{
+      width: 100%;
+      max-width: 100%;
+      grid-template-columns: 1fr;    /* Sol kartı kaldırınca tek kolon */
+    }
+
+    body.embed .brand-card{
+      display: none;                 /* Marka kartını gizle */
+    }
+
+    body.embed .panel{
+      min-height: 100vh;
+      max-height: 100vh;
+      border-radius: 18px;
+      box-shadow: none;              /* Shadow zaten dış çerçeveden geliyor */
+    }
+
     :root{
       --bg:#0b1020;
       --panel:#0e1528;
@@ -207,7 +234,19 @@
 
   <script>
      
-  const BRAND_KEY = "barbare";  // <-- BRANDS JSON’daki anahtarla birebir AYNI
+   // URL paramlarını oku
+  const params = new URLSearchParams(location.search);
+
+  // brand param varsa onu kullan, yoksa barbare
+  const BRAND_KEY = params.get("brand") || "barbare";
+
+  // embed=1 ise body'ye embed class'ı ekle
+  if (params.get("embed") === "1") {
+    document.addEventListener("DOMContentLoaded", () => {
+      document.body.classList.add("embed");
+    });
+  }
+
 
   (function(){
     /* ====== AYAR ====== */
