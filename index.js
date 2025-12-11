@@ -2,9 +2,19 @@ import express from "express";
 import cors from "cors";
 import rateLimit from "express-rate-limit";
 import dotenv from "dotenv";
+import pkg from "pg";
+const { Pool } = pkg;
 import { TransactionalEmailsApi, SendSmtpEmail } from "@getbrevo/brevo";
 
 dotenv.config();
+
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.NODE_ENV === "production"
+    ? { rejectUnauthorized: false } // Render gibi managed DB'lerde güvenli
+    : false,
+});
+
 
 const app = express();
 console.log("[boot] node version:", process.version);
@@ -317,6 +327,7 @@ async function openAI(path, { method = "GET", body } = {}) {
   return res.json();
 }
 
+
 // Assistant yanıtından handoff JSON çıkar
 
 // --- Metinden handoff çıkarımı (fallback) ---
@@ -627,6 +638,100 @@ function normalizeTimeTR(input) {
   return null;
 }
 
+async function ensureTables() {
+  if (!process.env.DATABASE_URL) {
+    console.warn("[db] DATABASE_URL yok — loglama devre dışı.");
+    return;
+  }
+
+  const sql = `
+    CREATE TABLE IF NOT EXISTS conversations (
+      id SERIAL PRIMARY KEY,
+      thread_id TEXT UNIQUE NOT NULL,
+      brand_key TEXT,
+      created_at TIMESTAMPTZ DEFAULT now(),
+      last_message_at TIMESTAMPTZ DEFAULT now()
+    );
+
+    CREATE TABLE IF NOT EXISTS messages (
+      id SERIAL PRIMARY KEY,
+      conversation_id INTEGER REFERENCES conversations(id) ON DELETE CASCADE,
+      role TEXT NOT NULL,                    -- 'user' | 'assistant'
+      text TEXT,                             -- temiz metin (kullanıcıya giden/gelen)
+      raw_text TEXT,                         -- istersen fence'li ham metin
+      handoff_kind TEXT,                     -- 'reservation' | 'customer_request' | null
+      handoff_payload JSONB,                 -- handoff payload'ının tamamı
+      created_at TIMESTAMPTZ DEFAULT now()
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_conversations_brand_key
+      ON conversations(brand_key);
+
+    CREATE INDEX IF NOT EXISTS idx_messages_conversation_id
+      ON messages(conversation_id);
+  `;
+
+  try {
+    await pool.query(sql);
+    console.log("[db] tablo kontrolü / oluşturma tamam ✅");
+  } catch (e) {
+    console.error("[db] tablo oluştururken hata:", e);
+  }
+}
+
+async function logChatMessage({ brandKey, threadId, role, text, rawText, handoff }) {
+  // DB yoksa sessizce çık (lokalde / ilk etapta sorun yaratmasın)
+  if (!process.env.DATABASE_URL) return;
+
+  try {
+    const client = await pool.connect();
+    try {
+      await client.query("BEGIN");
+
+      // 1) Konuşmayı upsert et (thread_id + brand_key)
+      const convRes = await client.query(
+        `
+        INSERT INTO conversations (thread_id, brand_key, created_at, last_message_at)
+        VALUES ($1, $2, now(), now())
+        ON CONFLICT (thread_id)
+        DO UPDATE SET last_message_at = now()
+        RETURNING id
+        `,
+        [threadId, brandKey || null]
+      );
+      const conversationId = convRes.rows[0].id;
+
+      // 2) Mesajı ekle
+      await client.query(
+        `
+        INSERT INTO messages
+          (conversation_id, role, text, raw_text, handoff_kind, handoff_payload, created_at)
+        VALUES
+          ($1, $2, $3, $4, $5, $6, now())
+        `,
+        [
+          conversationId,
+          role,
+          text || null,
+          rawText || null,
+          handoff ? handoff.kind || null : null,
+          handoff ? JSON.stringify(handoff.payload || null) : null,
+        ]
+      );
+
+      await client.query("COMMIT");
+    } catch (e) {
+      await client.query("ROLLBACK");
+      console.error("[db] logChatMessage transaction error:", e);
+    } finally {
+      client.release();
+    }
+  } catch (e) {
+    console.error("[db] connection error:", e);
+  }
+}
+
+
 
 // Metinden rezervasyon niyeti sezer (rez/mahzen/bağ/tadım + tarih/saat ipucu)
 function inferReservationIntentFromText(t) {
@@ -693,6 +798,16 @@ app.post("/api/chat/stream", chatLimiter, async (req, res) => {
     if (!brandCfg) {
       return res.status(403).json({ error: "unknown_brand", detail: "brandKey not allowed or missing" });
     }
+    
+    // 🔴 BURAYA EKLE: user mesajını logla
+await logChatMessage({
+  brandKey,
+  threadId,
+  role: "user",
+  text: message,
+  rawText: message,
+  handoff: null,
+});
 
     
    // SSE başlıkları
@@ -912,9 +1027,7 @@ console.log("[handoff] PREP(stream-end)", {
 
 if (handoff) {
   try {
-        // Payload'ta rezervasyon sinyali varsa, customer_request'ı reservation'a çevir
     handoff = coerceKindByPayload(handoff);
-
     const clean = sanitizeHandoffPayload(handoff.payload, handoff.kind, brandCfg);
     await sendHandoffEmail({ brandKey, kind: handoff.kind, payload: clean, brandCfg });
     console.log("[handoff][stream] SENT");
@@ -925,6 +1038,21 @@ if (handoff) {
   }
 } else {
   console.log("[handoff][stream] no handoff block/signal found");
+}
+
+// 🔵 BURAYA: assistant cevabını logla
+try {
+  const cleanText = accTextOriginal.replace(/```[\s\S]*?```/g, "").trim();
+  await logChatMessage({
+    brandKey,
+    threadId,
+    role: "assistant",
+    text: cleanText,
+    rawText: accTextOriginal,
+    handoff,
+  });
+} catch (e) {
+  console.error("[db] logChatMessage (stream assistant) error:", e);
 }
 
 
@@ -989,18 +1117,28 @@ app.post("/api/chat/message", chatLimiter, async (req, res) => {
     return res.status(400).json({ error: "missing_params", detail: "threadId and message are required" });
   }
 
-  // BRAND: brandKey zorunlu ve whitelist kontrolü
-  const brandCfg = getBrandConfig(brandKey);
-  if (!brandCfg) {
-    return res.status(403).json({ error: "unknown_brand", detail: "brandKey not allowed or missing" });
-  }
+ // BRAND: brandKey zorunlu ve whitelist kontrolü
+const brandCfg = getBrandConfig(brandKey);
+if (!brandCfg) {
+  return res.status(403).json({ error: "unknown_brand", detail: "brandKey not allowed or missing" });
+}
 
-  try {
-    // 2.a) Mesajı threade ekle
-    await openAI(`/threads/${threadId}/messages`, {
-      method: "POST",
-      body: { role: "user", content: message },
-    });
+try {
+  //  BURAYA: user mesajını logla
+  await logChatMessage({
+    brandKey,
+    threadId,
+    role: "user",
+    text: message,
+    rawText: message,
+    handoff: null,
+  });
+
+  // 2.a) Mesajı threade ekle
+  await openAI(`/threads/${threadId}/messages`, {
+    method: "POST",
+    body: { role: "user", content: message },
+  });
 
     // 2.b) Run oluştur  (assistant_id: brand öncelikli, yoksa global fallback)
   const run = await openAI(`/threads/${threadId}/runs`, {
@@ -1095,8 +1233,19 @@ text = stripFenced(text);
   text = text.replace(/```[\s\S]*?```/g, "").trim();
 }
 
-
-
+// 🔵 BURAYA: assistant cevabını logla
+try {
+  await logChatMessage({
+    brandKey,
+    threadId,
+    role: "assistant",
+    text,
+    rawText: text,      // burada zaten fence'ler temizlenmiş metin var
+    handoff,
+  });
+} catch (e) {
+  console.error("[db] logChatMessage (poll assistant) error:", e);
+}
 
 return res.json({
   status: "ok",
@@ -1157,6 +1306,10 @@ app.post("/_mail_test", async (req, res) => {
     console.error("[mail][test] error:", status, body);
     res.status(status).json({ ok: false, error: body });
   }
+});
+
+await ensureTables().catch((e) => {
+  console.error("[db] ensureTables hata:", e);
 });
 
 const server = app.listen(PORT, () => {
