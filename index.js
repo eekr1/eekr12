@@ -916,7 +916,7 @@ if (handoff) {
     handoff = coerceKindByPayload(handoff);
 
     const clean = sanitizeHandoffPayload(handoff.payload, handoff.kind, brandCfg);
-    await sendHandoffEmail({ kind: handoff.kind, payload: clean, brandCfg });
+    await sendHandoffEmail({ brandKey, kind: handoff.kind, payload: clean, brandCfg });
     console.log("[handoff][stream] SENT");
   } catch (e) {
     console.error("[handoff][stream] email failed or dropped:", {
@@ -1071,6 +1071,7 @@ text = stripFenced(text);
         handoff = inferred;
         console.log("[handoff][fallback][poll] inferred from text");
       }
+      text = stripFenced(text);
     }
 
     if (handoff) {
